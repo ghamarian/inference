@@ -133,84 +133,112 @@ def train(CFR, sess, train_step, D, I_valid, D_test, logfile, i_exp):
 
     ''' Train for multiple iterations '''
     for i in range(FLAGS.iterations):
-        train_once(CFR, D, D_test, I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, n_train,
+        objnan = train_once(CFR, D, D_test, I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, n_train,
                    objnan, p_treated, preds_test, preds_train, reps, reps_test, sess, train_step)
 
     return losses, preds_train, preds_test, reps, reps_test
 
 
+def should_compute_loss(i):
+    ''' Compute loss every N iterations '''
+    return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
+
 def train_once(CFR, D, D_test, I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, n_train,
                objnan, p_treated, preds_test, preds_train, reps, reps_test, sess, train_step):
-    ''' Fetch sample '''
-    I = random.sample(range(0, n_train), FLAGS.batch_size)
-    x_batch = D['x'][I_train, :][I, :]
-    t_batch = D['t'][I_train, :][I]
-    y_batch = D['yf'][I_train, :][I]
+
+    t_batch, x_batch, y_batch = fetch_batch(D, I_train, n_train)
+
     if __DEBUG__:
-        M = sess.run(cfr.pop_dist(CFR.x, CFR.t), feed_dict={CFR.x: x_batch, CFR.t: t_batch})
-        log(logfile,
-            'Median: %.4g, Mean: %.4f, Max: %.4f' % (np.median(M.tolist()), np.mean(M.tolist()), np.amax(M.tolist())))
-    ''' Do one step of gradient descent '''
+        log_stats(CFR, logfile, sess, t_batch, x_batch)
+
     if not objnan:
-        sess.run(train_step, feed_dict={CFR.x: x_batch, CFR.t: t_batch, \
-                                        CFR.y_: y_batch, CFR.do_in: FLAGS.dropout_in, CFR.do_out: FLAGS.dropout_out, \
-                                        CFR.r_alpha: FLAGS.p_alpha, CFR.r_lambda: FLAGS.p_lambda, CFR.p_t: p_treated})
+        gradient_step(CFR, p_treated, sess, t_batch, train_step, x_batch, y_batch)
+
     ''' Project variable selection weights '''
     if FLAGS.varsel:
         wip = simplex_project(sess.run(CFR.weights_in[0]), 1)
         sess.run(CFR.projection, feed_dict={CFR.w_proj: wip})
-    ''' Compute loss every N iterations '''
-    if i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1:
-        obj_loss, f_error, imb_err = sess.run([CFR.tot_loss, CFR.pred_loss, CFR.imb_dist],
-                                              feed_dict=dict_factual)
 
-        rep = sess.run(CFR.h_rep_norm, feed_dict={CFR.x: D['x'], CFR.do_in: 1.0})
-        rep_norm = np.mean(np.sqrt(np.sum(np.square(rep), 1)))
+    if should_compute_loss(i):
+        objnan = compute_loss(CFR, D, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, objnan, sess,
+                              t_batch, x_batch, y_batch)
 
-        cf_error = np.nan
-        if D['HAVE_TRUTH']:
-            cf_error = sess.run(CFR.pred_loss, feed_dict=dict_cfactual)
-
-        valid_obj = np.nan;
-        valid_imb = np.nan;
-        valid_f_error = np.nan;
-        if FLAGS.val_part > 0:
-            valid_obj, valid_f_error, valid_imb = sess.run([CFR.tot_loss, CFR.pred_loss, CFR.imb_dist],
-                                                           feed_dict=dict_valid)
-
-        losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
-        loss_str = str(i) + '\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' \
-                   % (obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj)
-
-        if FLAGS.loss == 'log':
-            y_pred = sess.run(CFR.output, feed_dict={CFR.x: x_batch, \
-                                                     CFR.t: t_batch, CFR.do_in: 1.0, CFR.do_out: 1.0})
-            y_pred = 1.0 * (y_pred > 0.5)
-            acc = 100 * (1 - np.mean(np.abs(y_batch - y_pred)))
-            loss_str += ',\tAcc: %.2f%%' % acc
-
-        log(logfile, loss_str)
-
-        if np.isnan(obj_loss):
-            log(logfile, 'Experiment %d: Objective is NaN. Skipping.' % i_exp)
-            objnan = True
-    ''' Compute predictions every M iterations '''
     if should_predict_in_M_iteration(i):
+        predict(CFR, D, D_test, i_exp, preds_test, preds_train, reps, reps_test, sess)
 
-        y_preds = run_y_fact_and_counter(CFR, D, D['t'], sess)
-        preds_train.append(y_preds)
+    return objnan
+
+
+def predict(CFR, D, D_test, i_exp, preds_test, preds_train, reps, reps_test, sess):
+    y_preds = run_y_fact_and_counter(CFR, D, D['t'], sess)
+    preds_train.append(y_preds)
+    if D_test is not None:
+        y_preds = run_y_fact_and_counter(CFR, D_test, D_test['t'], sess)
+        preds_test.append(y_preds)
+    if FLAGS.save_rep and i_exp == 1:
+        reps_i = run_h_rep(CFR, D['x'], sess)
+        reps.append(reps_i)
 
         if D_test is not None:
-            y_preds = run_y_fact_and_counter(CFR, D_test, D_test['t'], sess)
-            preds_test.append(y_preds)
+            reps_test_i = run_h_rep(CFR, D_test['x'], sess)
+            reps_test.append(reps_test_i)
 
-        if FLAGS.save_rep and i_exp == 1:
-            reps_i = sess.run([CFR.h_rep], feed_dict={CFR.x: D['x'], CFR.do_in: 1.0, CFR.do_out: 0.0})
-            reps.append(reps_i)
 
-            if D_test is not None:
-                reps_test_i = sess.run([CFR.h_rep], feed_dict={CFR.x: D_test['x'], CFR.do_in: 1.0, CFR.do_out: 0.0})
-                reps_test.append(reps_test_i)
+def compute_loss(CFR, D, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, objnan, sess, t_batch,
+                 x_batch, y_batch):
+    obj_loss, f_error, imb_err = sess.run([CFR.tot_loss, CFR.pred_loss, CFR.imb_dist], feed_dict=dict_factual)
+    # TODO what the heck is this line?
+    rep = sess.run(CFR.h_rep_norm, feed_dict={CFR.x: D['x'], CFR.do_in: 1.0})
+    rep_norm = np.mean(np.sqrt(np.sum(np.square(rep), 1)))
+    cf_error = np.nan
+    if D['HAVE_TRUTH']:
+        cf_error = sess.run(CFR.pred_loss, feed_dict=dict_cfactual)
+    valid_obj = np.nan
+    valid_imb = np.nan
+    valid_f_error = np.nan
+    if FLAGS.val_part > 0:
+        valid_obj, valid_f_error, valid_imb = sess.run([CFR.tot_loss, CFR.pred_loss, CFR.imb_dist],
+                                                       feed_dict=dict_valid)
+    losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
+    loss_str = str(i) + '\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' \
+               % (obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj)
+    if FLAGS.loss == 'log':
+        y_pred = sess.run(CFR.output, feed_dict={CFR.x: x_batch, \
+                                                 CFR.t: t_batch, CFR.do_in: 1.0, CFR.do_out: 1.0})
+        y_pred = 1.0 * (y_pred > 0.5)
+        acc = 100 * (1 - np.mean(np.abs(y_batch - y_pred)))
+        loss_str += ',\tAcc: %.2f%%' % acc
+    log(logfile, loss_str)
+    if np.isnan(obj_loss):
+        log(logfile, 'Experiment %d: Objective is NaN. Skipping.' % i_exp)
+        objnan = True
+    return objnan
+
+
+def gradient_step(CFR, p_treated, sess, t_batch, train_step, x_batch, y_batch):
+    sess.run(train_step, feed_dict={CFR.x: x_batch, CFR.t: t_batch, CFR.y_: y_batch, CFR.do_in: FLAGS.dropout_in,
+                                    CFR.do_out: FLAGS.dropout_out, CFR.r_alpha: FLAGS.p_alpha,
+                                    CFR.r_lambda: FLAGS.p_lambda, CFR.p_t: p_treated})
+
+
+def log_stats(CFR, logfile, sess, t_batch, x_batch):
+    M = sess.run(cfr.pop_dist(CFR.x, CFR.t), feed_dict={CFR.x: x_batch, CFR.t: t_batch})
+    log(logfile,
+        'Median: %.4g, Mean: %.4f, Max: %.4f' % (np.median(M.tolist()), np.mean(M.tolist()), np.amax(M.tolist())))
+
+
+def fetch_batch(D, I_train, n_train):
+    batch_indices = random.sample(range(0, n_train), FLAGS.batch_size)
+
+    x_batch = D['x'][I_train, :][batch_indices, :]
+    t_batch = D['t'][I_train, :][batch_indices]
+    y_batch = D['yf'][I_train, :][batch_indices]
+
+    return t_batch, x_batch, y_batch
+
+
+def run_h_rep(CFR, d_x_, sess):
+    return sess.run([CFR.h_rep], feed_dict={CFR.x: d_x_, CFR.do_in: 1.0, CFR.do_out: 0.0})
 
 
 def run_y_fact_and_counter(CFR, D, d_t, sess):
@@ -225,6 +253,7 @@ def run_y_pred(CFR, D, d_t, sess):
 
 
 def should_predict_in_M_iteration(i):
+    ''' Compute predictions every M iterations '''
     return (FLAGS.pred_output_delay > 0 and i % FLAGS.pred_output_delay == 0) or i == FLAGS.iterations - 1
 
 
