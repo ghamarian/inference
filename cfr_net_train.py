@@ -71,21 +71,23 @@ if FLAGS.debug:
     __DEBUG__ = True
 
 class Train:
-    def __init__(self, CFR, sess, D, D_test, i_exp, logfile):
+    def __init__(self, CFR, sess, D, D_test, i_exp, logfile, train_step, I_valid):
         self.CFR = CFR
         self.sess = sess
         self.D = D
         self.D_test = D_test
         self.i_exp = i_exp
         self.logfile = logfile
+        self.I_valid = I_valid
+        self.train_step = train_step
 
-    def train(self, train_step, I_valid):
+    def train(self):
         """ Trains a CFR model on supplied data """
 
         ''' Train/validation split '''
         n = self.D['x'].shape[0]
         I = range(n)
-        I_train = list(set(I) - set(I_valid))
+        I_train = list(set(I) - set(self.I_valid))
         n_train = len(I_train)
 
         ''' Compute treatment probability'''
@@ -96,7 +98,7 @@ class Train:
                         self.CFR.do_out: 1.0, self.CFR.r_alpha: FLAGS.p_alpha, self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated}
 
         if FLAGS.val_part > 0:
-            dict_valid = {self.CFR.x: self.D['x'][I_valid, :], self.CFR.t: self.D['t'][I_valid, :], self.CFR.y_: self.D['yf'][I_valid, :], self.CFR.do_in: 1.0,
+            dict_valid = {self.CFR.x: self.D['x'][self.I_valid, :], self.CFR.t: self.D['t'][self.I_valid, :], self.CFR.y_: self.D['yf'][self.I_valid, :], self.CFR.do_in: 1.0,
                           self.CFR.do_out: 1.0, self.CFR.r_alpha: FLAGS.p_alpha, self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated}
 
         if self.D['HAVE_TRUTH']:
@@ -139,7 +141,7 @@ class Train:
         ''' Train for multiple iterations '''
         for i in range(FLAGS.iterations):
             objnan = self.train_once(I_train, dict_cfactual, dict_factual, dict_valid, i, losses, n_train, objnan,
-                                     p_treated, preds_test, preds_train, reps, reps_test, train_step)
+                                     p_treated, preds_test, preds_train, reps, reps_test)
 
         return losses, preds_train, preds_test, reps, reps_test
 
@@ -150,14 +152,14 @@ class Train:
 
 
     def train_once(self, I_train, dict_cfactual, dict_factual, dict_valid, i, losses, n_train, objnan, p_treated,
-                   preds_test, preds_train, reps, reps_test, train_step):
+                   preds_test, preds_train, reps, reps_test):
         t_batch, x_batch, y_batch = self.fetch_batch(I_train, n_train)
 
         if __DEBUG__:
             self.log_stats(t_batch, x_batch)
 
         if not objnan:
-            self.gradient_step(p_treated, t_batch, train_step, x_batch, y_batch)
+            self.gradient_step(p_treated, t_batch, x_batch, y_batch)
 
         ''' Project variable selection weights '''
         if FLAGS.varsel:
@@ -239,8 +241,8 @@ class Train:
         return acc
 
 
-    def gradient_step(self, p_treated, t_batch, train_step, x_batch, y_batch):
-        self.sess.run(train_step, feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch, self.CFR.y_: y_batch, self.CFR.do_in: FLAGS.dropout_in,
+    def gradient_step(self, p_treated, t_batch, x_batch, y_batch):
+        self.sess.run(self.train_step, feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch, self.CFR.y_: y_batch, self.CFR.do_in: FLAGS.dropout_in,
                                         self.CFR.do_out: FLAGS.dropout_out, self.CFR.r_alpha: FLAGS.p_alpha,
                                         self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
 
@@ -442,9 +444,9 @@ def run(outdir):
         I_train, I_valid = validation_split(D_exp, FLAGS.val_part)
 
         ''' Run training loop '''
-        trainer = Train(CFR, sess, D_exp, D_exp_test, i_exp, logfile)
+        trainer = Train(CFR, sess, D_exp, D_exp_test, i_exp, logfile, train_step, I_valid)
         losses, preds_train, preds_test, reps, reps_test = \
-            trainer.train(train_step, I_valid)
+            trainer.train()
 
         ''' Collect all reps '''
         all_preds_train.append(preds_train)
