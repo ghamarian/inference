@@ -70,209 +70,212 @@ __DEBUG__ = False
 if FLAGS.debug:
     __DEBUG__ = True
 
+class Train:
+    def __init__(self, CFR, sess):
+        self.CFR = CFR
+        self.sess = sess
 
-def train(CFR, sess, train_step, D, I_valid, D_test, logfile, i_exp):
-    """ Trains a CFR model on supplied data """
+    def train(self, train_step, D, I_valid, D_test, logfile, i_exp):
+        """ Trains a CFR model on supplied data """
 
-    ''' Train/validation split '''
-    n = D['x'].shape[0]
-    I = range(n);
-    I_train = list(set(I) - set(I_valid))
-    n_train = len(I_train)
+        ''' Train/validation split '''
+        n = D['x'].shape[0]
+        I = range(n)
+        I_train = list(set(I) - set(I_valid))
+        n_train = len(I_train)
 
-    ''' Compute treatment probability'''
-    p_treated = np.mean(D['t'][I_train, :])
+        ''' Compute treatment probability'''
+        p_treated = np.mean(D['t'][I_train, :])
 
-    ''' Set up loss feed_dicts'''
-    dict_factual = {CFR.x: D['x'][I_train, :], CFR.t: D['t'][I_train, :], CFR.y_: D['yf'][I_train, :], CFR.do_in: 1.0,
-                    CFR.do_out: 1.0, CFR.r_alpha: FLAGS.p_alpha, CFR.r_lambda: FLAGS.p_lambda, CFR.p_t: p_treated}
+        ''' Set up loss feed_dicts'''
+        dict_factual = {self.CFR.x: D['x'][I_train, :], self.CFR.t: D['t'][I_train, :], self.CFR.y_: D['yf'][I_train, :], self.CFR.do_in: 1.0,
+                        self.CFR.do_out: 1.0, self.CFR.r_alpha: FLAGS.p_alpha, self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated}
 
-    if FLAGS.val_part > 0:
-        dict_valid = {CFR.x: D['x'][I_valid, :], CFR.t: D['t'][I_valid, :], CFR.y_: D['yf'][I_valid, :], CFR.do_in: 1.0,
-                      CFR.do_out: 1.0, CFR.r_alpha: FLAGS.p_alpha, CFR.r_lambda: FLAGS.p_lambda, CFR.p_t: p_treated}
+        if FLAGS.val_part > 0:
+            dict_valid = {self.CFR.x: D['x'][I_valid, :], self.CFR.t: D['t'][I_valid, :], self.CFR.y_: D['yf'][I_valid, :], self.CFR.do_in: 1.0,
+                          self.CFR.do_out: 1.0, self.CFR.r_alpha: FLAGS.p_alpha, self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated}
 
-    if D['HAVE_TRUTH']:
-        dict_cfactual = {CFR.x: D['x'][I_train, :], CFR.t: 1 - D['t'][I_train, :], CFR.y_: D['ycf'][I_train, :],
-                         CFR.do_in: 1.0, CFR.do_out: 1.0}
+        if D['HAVE_TRUTH']:
+            dict_cfactual = {self.CFR.x: D['x'][I_train, :], self.CFR.t: 1 - D['t'][I_train, :], self.CFR.y_: D['ycf'][I_train, :],
+                             self.CFR.do_in: 1.0, self.CFR.do_out: 1.0}
 
-    ''' Initialize TensorFlow variables '''
-    sess.run(tf.global_variables_initializer())
+        ''' Initialize TensorFlow variables '''
+        self.sess.run(tf.global_variables_initializer())
 
-    ''' Set up for storing predictions '''
-    preds_train = []
-    preds_test = []
+        ''' Set up for storing predictions '''
+        preds_train = []
+        preds_test = []
 
-    ''' Compute losses '''
-    losses = []
-    obj_loss, f_error, imb_err = sess.run([CFR.tot_loss, CFR.pred_loss, CFR.imb_dist], feed_dict=dict_factual)
+        ''' Compute losses '''
+        losses = []
+        obj_loss, f_error, imb_err = self.sess.run([self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist], feed_dict=dict_factual)
 
-    cf_error = np.nan
-    if D['HAVE_TRUTH']:
-        cf_error = sess.run(CFR.pred_loss, feed_dict=dict_cfactual)
-
-    valid_obj = np.nan
-    valid_imb = np.nan
-    valid_f_error = np.nan
-    if FLAGS.val_part > 0:
-        valid_obj, valid_f_error, valid_imb = sess.run([CFR.tot_loss, CFR.pred_loss, CFR.imb_dist],
-                                                       feed_dict=dict_valid)
-    else:
-        dict_valid = dict(
-            itertools.product([CFR.x, CFR.t, CFR.y_, CFR.do_in, CFR.do_out, CFR.r_alpha, CFR.r_lambda, CFR.p_t],
-                              np.array([])))
-
-    losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
-
-    objnan = False
-
-    reps = []
-    reps_test = []
-
-    ''' Train for multiple iterations '''
-    for i in range(FLAGS.iterations):
-        objnan = train_once(CFR, D, D_test, I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses,
-                            n_train,
-                            objnan, p_treated, preds_test, preds_train, reps, reps_test, sess, train_step)
-
-    return losses, preds_train, preds_test, reps, reps_test
-
-
-def should_compute_loss(i):
-    ''' Compute loss every N iterations '''
-    return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
-
-
-def train_once(CFR, D, D_test, I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, n_train,
-               objnan, p_treated, preds_test, preds_train, reps, reps_test, sess, train_step):
-    t_batch, x_batch, y_batch = fetch_batch(D, I_train, n_train)
-
-    if __DEBUG__:
-        log_stats(CFR, logfile, sess, t_batch, x_batch)
-
-    if not objnan:
-        gradient_step(CFR, p_treated, sess, t_batch, train_step, x_batch, y_batch)
-
-    ''' Project variable selection weights '''
-    if FLAGS.varsel:
-        wip = simplex_project(sess.run(CFR.weights_in[0]), 1)
-        sess.run(CFR.projection, feed_dict={CFR.w_proj: wip})
-
-    if should_compute_loss(i):
-        objnan = compute_loss(CFR, D, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, objnan, sess,
-                              t_batch, x_batch, y_batch)
-
-    if should_predict_in_M_iteration(i):
-        predict(CFR, D, D_test, i_exp, preds_test, preds_train, reps, reps_test, sess)
-
-    return objnan
-
-
-def predict(CFR, D, D_test, i_exp, preds_test, preds_train, reps, reps_test, sess):
-    y_preds = run_y_fact_and_counter(CFR, D, D['t'], sess)
-    preds_train.append(y_preds)
-    if D_test is not None:
-        y_preds = run_y_fact_and_counter(CFR, D_test, D_test['t'], sess)
-        preds_test.append(y_preds)
-    if FLAGS.save_rep and i_exp == 1:
-        reps_i = run_h_rep(CFR, D['x'], sess)
-        reps.append(reps_i)
-
-        if D_test is not None:
-            reps_test_i = run_h_rep(CFR, D_test['x'], sess)
-            reps_test.append(reps_test_i)
-
-
-def compute_loss(CFR, D, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, objnan, sess, t_batch,
-                 x_batch, y_batch):
-    obj_loss, f_error, imb_err = sess.run([CFR.tot_loss, CFR.pred_loss, CFR.imb_dist], feed_dict=dict_factual)
-
-    # TODO what the heck is this line?
-    rep = sess.run(CFR.h_rep_norm, feed_dict={CFR.x: D['x'], CFR.do_in: 1.0})
-    rep_norm = np.mean(np.sqrt(np.sum(np.square(rep), 1)))
-
-    if D['HAVE_TRUTH']:
-        cf_error = sess.run(CFR.pred_loss, feed_dict=dict_cfactual)
-    else:
         cf_error = np.nan
+        if D['HAVE_TRUTH']:
+            cf_error = self.sess.run(self.CFR.pred_loss, feed_dict=dict_cfactual)
 
-    valid_obj = np.nan
-    valid_imb = np.nan
-    valid_f_error = np.nan
+        valid_obj = np.nan
+        valid_imb = np.nan
+        valid_f_error = np.nan
+        if FLAGS.val_part > 0:
+            valid_obj, valid_f_error, valid_imb = self.sess.run([self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist],
+                                                           feed_dict=dict_valid)
+        else:
+            dict_valid = dict(
+                itertools.product([self.CFR.x, self.CFR.t, self.CFR.y_, self.CFR.do_in, self.CFR.do_out, self.CFR.r_alpha, self.CFR.r_lambda, self.CFR.p_t],
+                                  np.array([])))
 
-    if FLAGS.val_part > 0:
-        valid_obj, valid_f_error, valid_imb = sess.run([CFR.tot_loss, CFR.pred_loss, CFR.imb_dist],
-                                                       feed_dict=dict_valid)
+        losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
 
-    losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
-    log_loss(CFR, cf_error, f_error, i, imb_err, logfile, obj_loss, sess, t_batch, valid_f_error, valid_imb, valid_obj,
-             x_batch, y_batch)
+        objnan = False
 
-    if np.isnan(obj_loss):
-        log(logfile, 'Experiment %d: Objective is NaN. Skipping.' % i_exp)
-        objnan = True
+        reps = []
+        reps_test = []
 
-    return objnan
+        ''' Train for multiple iterations '''
+        for i in range(FLAGS.iterations):
+            objnan = self.train_once(D, D_test, I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses,
+                                n_train,
+                                objnan, p_treated, preds_test, preds_train, reps, reps_test, train_step)
 
-
-def log_loss(CFR, cf_error, f_error, i, imb_err, logfile, obj_loss, sess, t_batch, valid_f_error, valid_imb, valid_obj,
-             x_batch, y_batch):
-    loss_str = '%d\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' % (
-        i, obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj)
-
-    if FLAGS.loss == 'log':
-        acc = compute_accuracy(CFR, sess, t_batch, x_batch, y_batch)
-        loss_str += ',\tAcc: %.2f%%' % acc
-
-    log(logfile, loss_str)
+        return losses, preds_train, preds_test, reps, reps_test
 
 
-def compute_accuracy(CFR, sess, t_batch, x_batch, y_batch):
-    y_pred = sess.run(CFR.output, feed_dict={CFR.x: x_batch, CFR.t: t_batch, CFR.do_in: 1.0, CFR.do_out: 1.0})
-    y_pred = 1.0 * (y_pred > 0.5)
-    acc = 100 * (1 - np.mean(np.abs(y_batch - y_pred)))
-    return acc
+    def should_compute_loss(self, i):
+        ''' Compute loss every N iterations '''
+        return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
 
 
-def gradient_step(CFR, p_treated, sess, t_batch, train_step, x_batch, y_batch):
-    sess.run(train_step, feed_dict={CFR.x: x_batch, CFR.t: t_batch, CFR.y_: y_batch, CFR.do_in: FLAGS.dropout_in,
-                                    CFR.do_out: FLAGS.dropout_out, CFR.r_alpha: FLAGS.p_alpha,
-                                    CFR.r_lambda: FLAGS.p_lambda, CFR.p_t: p_treated})
+    def train_once(self, D, D_test, I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, n_train,
+                   objnan, p_treated, preds_test, preds_train, reps, reps_test, train_step):
+        t_batch, x_batch, y_batch = self.fetch_batch(D, I_train, n_train)
+
+        if __DEBUG__:
+            self.log_stats(logfile, t_batch, x_batch)
+
+        if not objnan:
+            self.gradient_step(p_treated, t_batch, train_step, x_batch, y_batch)
+
+        ''' Project variable selection weights '''
+        if FLAGS.varsel:
+            wip = simplex_project(self.sess.run(self.CFR.weights_in[0]), 1)
+            self.sess.run(self.CFR.projection, feed_dict={self.CFR.w_proj: wip})
+
+        if self.should_compute_loss(i):
+            objnan = self.compute_loss(D, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, objnan, t_batch, x_batch, y_batch)
+
+        if self.should_predict_in_M_iteration(i):
+            self.predict(D, D_test, i_exp, preds_test, preds_train, reps, reps_test)
+
+        return objnan
 
 
-def log_stats(CFR, logfile, sess, t_batch, x_batch):
-    M = sess.run(cfr.pop_dist(CFR.x, CFR.t), feed_dict={CFR.x: x_batch, CFR.t: t_batch})
-    log(logfile,
-        'Median: %.4g, Mean: %.4f, Max: %.4f' % (np.median(M.tolist()), np.mean(M.tolist()), np.amax(M.tolist())))
+    def predict(self, D, D_test, i_exp, preds_test, preds_train, reps, reps_test):
+        y_preds = self.run_y_fact_and_counter(D, D['t'])
+        preds_train.append(y_preds)
+        if D_test is not None:
+            y_preds = self.run_y_fact_and_counter(D_test, D_test['t'])
+            preds_test.append(y_preds)
+        if FLAGS.save_rep and i_exp == 1:
+            reps_i = self.run_h_rep(D['x'])
+            reps.append(reps_i)
+
+            if D_test is not None:
+                reps_test_i = self.run_h_rep(D_test['x'])
+                reps_test.append(reps_test_i)
 
 
-def fetch_batch(D, I_train, n_train):
-    batch_indices = random.sample(range(0, n_train), FLAGS.batch_size)
+    def compute_loss(self, D, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, objnan, t_batch,
+                     x_batch, y_batch):
+        obj_loss, f_error, imb_err = self.sess.run([self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist], feed_dict=dict_factual)
 
-    x_batch = D['x'][I_train, :][batch_indices, :]
-    t_batch = D['t'][I_train, :][batch_indices]
-    y_batch = D['yf'][I_train, :][batch_indices]
+        # TODO what the heck is this line?
+        rep = self.sess.run(self.CFR.h_rep_norm, feed_dict={self.CFR.x: D['x'], self.CFR.do_in: 1.0})
+        rep_norm = np.mean(np.sqrt(np.sum(np.square(rep), 1)))
 
-    return t_batch, x_batch, y_batch
+        if D['HAVE_TRUTH']:
+            cf_error = self.sess.run(self.CFR.pred_loss, feed_dict=dict_cfactual)
+        else:
+            cf_error = np.nan
+
+        valid_obj = np.nan
+        valid_imb = np.nan
+        valid_f_error = np.nan
+
+        if FLAGS.val_part > 0:
+            valid_obj, valid_f_error, valid_imb = self.sess.run([self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist],
+                                                           feed_dict=dict_valid)
+
+        losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
+        self.log_loss(cf_error, f_error, i, imb_err, logfile, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj,
+                 x_batch, y_batch)
+
+        if np.isnan(obj_loss):
+            log(logfile, 'Experiment %d: Objective is NaN. Skipping.' % i_exp)
+            objnan = True
+
+        return objnan
 
 
-def run_h_rep(CFR, d_x_, sess):
-    return sess.run([CFR.h_rep], feed_dict={CFR.x: d_x_, CFR.do_in: 1.0, CFR.do_out: 0.0})
+    def log_loss(self, cf_error, f_error, i, imb_err, logfile, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj,
+                 x_batch, y_batch):
+        loss_str = '%d\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' % (
+            i, obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj)
+
+        if FLAGS.loss == 'log':
+            acc = self.compute_accuracy(t_batch, x_batch, y_batch)
+            loss_str += ',\tAcc: %.2f%%' % acc
+
+        log(logfile, loss_str)
 
 
-def run_y_fact_and_counter(CFR, D, d_t, sess):
-    y_pred_f = run_y_pred(CFR, D, d_t, sess)
-    y_pred_cf = run_y_pred(CFR, D, 1 - d_t, sess)
-    return np.concatenate([y_pred_f, y_pred_cf], axis=1)
+    def compute_accuracy(self, t_batch, x_batch, y_batch):
+        y_pred = self.sess.run(self.CFR.output, feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch, self.CFR.do_in: 1.0, self.CFR.do_out: 1.0})
+        y_pred = 1.0 * (y_pred > 0.5)
+        acc = 100 * (1 - np.mean(np.abs(y_batch - y_pred)))
+        return acc
 
 
-def run_y_pred(CFR, D, d_t, sess):
-    y_pred_f = sess.run(CFR.output, feed_dict={CFR.x: D['x'], CFR.t: d_t, CFR.do_in: 1.0, CFR.do_out: 1.0})
-    return y_pred_f
+    def gradient_step(self, p_treated, t_batch, train_step, x_batch, y_batch):
+        self.sess.run(train_step, feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch, self.CFR.y_: y_batch, self.CFR.do_in: FLAGS.dropout_in,
+                                        self.CFR.do_out: FLAGS.dropout_out, self.CFR.r_alpha: FLAGS.p_alpha,
+                                        self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
 
 
-def should_predict_in_M_iteration(i):
-    ''' Compute predictions every M iterations '''
-    return (FLAGS.pred_output_delay > 0 and i % FLAGS.pred_output_delay == 0) or i == FLAGS.iterations - 1
+    def log_stats(self, logfile, t_batch, x_batch):
+        M = self.sess.run(cfr.pop_dist(self.CFR.x, self.CFR.t), feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch})
+        log(logfile,
+            'Median: %.4g, Mean: %.4f, Max: %.4f' % (np.median(M.tolist()), np.mean(M.tolist()), np.amax(M.tolist())))
+
+
+    def fetch_batch(self, D, I_train, n_train):
+        batch_indices = random.sample(range(0, n_train), FLAGS.batch_size)
+
+        x_batch = D['x'][I_train, :][batch_indices, :]
+        t_batch = D['t'][I_train, :][batch_indices]
+        y_batch = D['yf'][I_train, :][batch_indices]
+
+        return t_batch, x_batch, y_batch
+
+
+    def run_h_rep(self, d_x_):
+        return self.sess.run([self.CFR.h_rep], feed_dict={self.CFR.x: d_x_, self.CFR.do_in: 1.0, self.CFR.do_out: 0.0})
+
+
+    def run_y_fact_and_counter(self, D, d_t):
+        y_pred_f = self.run_y_pred(D, d_t)
+        y_pred_cf = self.run_y_pred(D, 1 - d_t)
+        return np.concatenate([y_pred_f, y_pred_cf], axis=1)
+
+
+    def run_y_pred(self, D, d_t):
+        y_pred_f = self.sess.run(self.CFR.output, feed_dict={self.CFR.x: D['x'], self.CFR.t: d_t, self.CFR.do_in: 1.0, self.CFR.do_out: 1.0})
+        return y_pred_f
+
+
+    def should_predict_in_M_iteration(self, i):
+        ''' Compute predictions every M iterations '''
+        return (FLAGS.pred_output_delay > 0 and i % FLAGS.pred_output_delay == 0) or i == FLAGS.iterations - 1
 
 
 def run(outdir):
@@ -436,9 +439,9 @@ def run(outdir):
         I_train, I_valid = validation_split(D_exp, FLAGS.val_part)
 
         ''' Run training loop '''
+        trainer = Train(CFR, sess)
         losses, preds_train, preds_test, reps, reps_test = \
-            train(CFR, sess, train_step, D_exp, I_valid, \
-                  D_exp_test, logfile, i_exp)
+            trainer.train(train_step, D_exp, I_valid, D_exp_test, logfile, i_exp)
 
         ''' Collect all reps '''
         all_preds_train.append(preds_train)
