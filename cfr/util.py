@@ -52,6 +52,7 @@ def load_data(fname):
             data_in = np.loadtxt(open(fname,"rb"),delimiter=",")
             x = data_in[:,5:]
 
+        data = {}
         data['x'] = x
         data['t'] = data_in[:,0:1]
         data['yf'] = data_in[:,1:2]
