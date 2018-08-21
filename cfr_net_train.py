@@ -71,13 +71,15 @@ if FLAGS.debug:
     __DEBUG__ = True
 
 class Train:
-    def __init__(self, CFR, sess, D, D_test):
+    def __init__(self, CFR, sess, D, D_test, i_exp, logfile):
         self.CFR = CFR
         self.sess = sess
         self.D = D
         self.D_test = D_test
+        self.i_exp = i_exp
+        self.logfile = logfile
 
-    def train(self, train_step, I_valid, logfile, i_exp):
+    def train(self, train_step, I_valid):
         """ Trains a CFR model on supplied data """
 
         ''' Train/validation split '''
@@ -136,8 +138,8 @@ class Train:
 
         ''' Train for multiple iterations '''
         for i in range(FLAGS.iterations):
-            objnan = self.train_once(I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses,
-                                     n_train, objnan, p_treated, preds_test, preds_train, reps, reps_test, train_step)
+            objnan = self.train_once(I_train, dict_cfactual, dict_factual, dict_valid, i, losses, n_train, objnan,
+                                     p_treated, preds_test, preds_train, reps, reps_test, train_step)
 
         return losses, preds_train, preds_test, reps, reps_test
 
@@ -147,12 +149,12 @@ class Train:
         return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
 
 
-    def train_once(self, I_train, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, n_train, objnan,
-                   p_treated, preds_test, preds_train, reps, reps_test, train_step):
+    def train_once(self, I_train, dict_cfactual, dict_factual, dict_valid, i, losses, n_train, objnan, p_treated,
+                   preds_test, preds_train, reps, reps_test, train_step):
         t_batch, x_batch, y_batch = self.fetch_batch(I_train, n_train)
 
         if __DEBUG__:
-            self.log_stats(logfile, t_batch, x_batch)
+            self.log_stats(t_batch, x_batch)
 
         if not objnan:
             self.gradient_step(p_treated, t_batch, train_step, x_batch, y_batch)
@@ -163,22 +165,22 @@ class Train:
             self.sess.run(self.CFR.projection, feed_dict={self.CFR.w_proj: wip})
 
         if self.should_compute_loss(i):
-            objnan = self.compute_loss(dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, objnan,
-                                       t_batch, x_batch, y_batch)
+            objnan = self.compute_loss(dict_cfactual, dict_factual, dict_valid, i, losses, objnan, t_batch, x_batch,
+                                       y_batch)
 
         if self.should_predict_in_M_iteration(i):
-            self.predict(i_exp, preds_test, preds_train, reps, reps_test)
+            self.predict(preds_test, preds_train, reps, reps_test)
 
         return objnan
 
 
-    def predict(self, i_exp, preds_test, preds_train, reps, reps_test):
+    def predict(self, preds_test, preds_train, reps, reps_test):
         y_preds = self.run_y_fact_and_counter(self.D, self.D['t'])
         preds_train.append(y_preds)
         if self.D_test is not None:
             y_preds = self.run_y_fact_and_counter(self.D_test, self.D_test['t'])
             preds_test.append(y_preds)
-        if FLAGS.save_rep and i_exp == 1:
+        if FLAGS.save_rep and self.i_exp == 1:
             reps_i = self.run_h_rep(self.D['x'])
             reps.append(reps_i)
 
@@ -187,8 +189,7 @@ class Train:
                 reps_test.append(reps_test_i)
 
 
-    def compute_loss(self, dict_cfactual, dict_factual, dict_valid, i, i_exp, logfile, losses, objnan, t_batch, x_batch,
-                     y_batch):
+    def compute_loss(self, dict_cfactual, dict_factual, dict_valid, i, losses, objnan, t_batch, x_batch, y_batch):
         obj_loss, f_error, imb_err = self.sess.run([self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist], feed_dict=dict_factual)
 
         # TODO what the heck is this line?
@@ -209,18 +210,18 @@ class Train:
                                                            feed_dict=dict_valid)
 
         losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
-        self.log_loss(cf_error, f_error, i, imb_err, logfile, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj,
-                 x_batch, y_batch)
+        self.log_loss(cf_error, f_error, i, imb_err, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj, x_batch,
+                      y_batch)
 
         if np.isnan(obj_loss):
-            log(logfile, 'Experiment %d: Objective is NaN. Skipping.' % i_exp)
+            log(self.logfile, 'Experiment %d: Objective is NaN. Skipping.' % self.i_exp)
             objnan = True
 
         return objnan
 
 
-    def log_loss(self, cf_error, f_error, i, imb_err, logfile, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj,
-                 x_batch, y_batch):
+    def log_loss(self, cf_error, f_error, i, imb_err, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj, x_batch,
+                 y_batch):
         loss_str = '%d\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' % (
             i, obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj)
 
@@ -228,7 +229,7 @@ class Train:
             acc = self.compute_accuracy(t_batch, x_batch, y_batch)
             loss_str += ',\tAcc: %.2f%%' % acc
 
-        log(logfile, loss_str)
+        log(self.logfile, loss_str)
 
 
     def compute_accuracy(self, t_batch, x_batch, y_batch):
@@ -244,9 +245,9 @@ class Train:
                                         self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
 
 
-    def log_stats(self, logfile, t_batch, x_batch):
+    def log_stats(self, t_batch, x_batch):
         M = self.sess.run(cfr.pop_dist(self.CFR.x, self.CFR.t), feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch})
-        log(logfile,
+        log(self.logfile,
             'Median: %.4g, Mean: %.4f, Max: %.4f' % (np.median(M.tolist()), np.mean(M.tolist()), np.amax(M.tolist())))
 
 
@@ -441,9 +442,9 @@ def run(outdir):
         I_train, I_valid = validation_split(D_exp, FLAGS.val_part)
 
         ''' Run training loop '''
-        trainer = Train(CFR, sess, D_exp, D_exp_test)
+        trainer = Train(CFR, sess, D_exp, D_exp_test, i_exp, logfile)
         losses, preds_train, preds_test, reps, reps_test = \
-            trainer.train(train_step, I_valid, logfile, i_exp)
+            trainer.train(train_step, I_valid)
 
         ''' Collect all reps '''
         all_preds_train.append(preds_train)
