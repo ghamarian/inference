@@ -158,9 +158,25 @@ class SessionRunner:
 
 
 class Train:
-    def __init__(self, CFR, sess_runner, D, D_test, i_exp, logfile, train_step, I_valid):
+    def __init__(self, CFR, sess_runner, has_test, outdir, outform, outform_test, lossform, npzfile, npzfile_test,
+                 repfile, repfile_test):
+        self.repfile = repfile
+        self.npzfile_test = npzfile_test
+        self.npzfile = npzfile
+        self.lossform = lossform
+        self.outform_test = outform_test
+        self.outform = outform
+        self.repfile_test = repfile_test
+        self.outdir = outdir
+        self.has_test = has_test
         self.CFR = CFR
         self.sess_runner = sess_runner
+
+        if FLAGS.varsel:
+            self.all_weights = None
+            self.all_beta = None
+
+    def set_data(self, D, D_test, i_exp, logfile, train_step, I_valid):
         self.D = D
         self.D_test = D_test
         self.i_exp = i_exp
@@ -179,10 +195,6 @@ class Train:
 
         ''' Set up loss feed_dicts'''
         self.sess_runner.set_feed_dicts(self.D, self.p_treated, self.I_train, self.I_valid)
-
-        if FLAGS.varsel:
-            self.all_weights = None
-            self.all_beta = None
 
     def train(self):
 
@@ -360,42 +372,41 @@ class Train:
     def get_all_weights(self):
         return self.all_weights
 
-    def save_results(self, output_nodes, has_test, outdir, outform, outform_test, lossform, npzfile, npzfile_test,
-                     repfile, repfile_test):
+    def save_results(self, output_nodes):
 
         losses, preds_train, preds_test, reps, reps_test = self.train()
 
         output_nodes.collect_all_reps(losses, preds_test, preds_train)
         ''' Fix shape for output (n_units, dim, n_reps, n_outputs) '''
         out_preds_train = np.swapaxes(np.swapaxes(output_nodes.all_preds_train, 1, 3), 0, 2)
-        if has_test:
+        if self.has_test:
             out_preds_test = np.swapaxes(np.swapaxes(output_nodes.all_preds_test, 1, 3), 0, 2)
         out_losses = np.swapaxes(np.swapaxes(output_nodes.all_losses, 0, 2), 0, 1)
         ''' Store predictions '''
-        log(self.logfile, 'Saving result to %s...\n' % outdir)
+        log(self.logfile, 'Saving result to %s...\n' % self.outdir)
 
         if FLAGS.output_csv:
-            np.savetxt('%s_%d.csv' % (outform, self.i_exp), preds_train[-1], delimiter=',')
-            np.savetxt('%s_%d.csv' % (outform_test, self.i_exp), preds_test[-1], delimiter=',')
-            np.savetxt('%s_%d.csv' % (lossform, self.i_exp), losses, delimiter=',')
+            np.savetxt('%s_%d.csv' % (self.outform, self.i_exp), preds_train[-1], delimiter=',')
+            np.savetxt('%s_%d.csv' % (self.outform_test, self.i_exp), preds_test[-1], delimiter=',')
+            np.savetxt('%s_%d.csv' % (self.lossform, self.i_exp), losses, delimiter=',')
         ''' Save results and predictions '''
         output_nodes.save_all_valid(self.I_valid)
         ''' Compute weights if doing variable selection '''
         if FLAGS.varsel:
             self.accumulate_weights()
-            np.savez(npzfile, pred=out_preds_train, loss=out_losses, w=self.get_all_weights(),
+            np.savez(self.npzfile, pred=out_preds_train, loss=out_losses, w=self.get_all_weights(),
                      beta=self.get_all_beta(),
                      val=output_nodes.get_all_valid())
         else:
-            np.savez(npzfile, pred=out_preds_train, loss=out_losses, val=output_nodes.get_all_valid())
-        if has_test:
-            np.savez(npzfile_test, pred=out_preds_test)
+            np.savez(self.npzfile, pred=out_preds_train, loss=out_losses, val=output_nodes.get_all_valid())
+        if self.has_test:
+            np.savez(self.npzfile_test, pred=out_preds_test)
         ''' Save representations '''
         if FLAGS.save_rep and self.i_exp == 1:
-            np.savez(repfile, rep=reps)
+            np.savez(self.repfile, rep=reps)
 
-            if has_test:
-                np.savez(repfile_test, rep=reps_test)
+            if self.has_test:
+                np.savez(self.repfile_test, rep=reps_test)
 
 
 class TrainRunner:
@@ -473,6 +484,10 @@ class TrainRunner:
 
         output_nodes = Output()
 
+        trainer = Train(CFR, sess_runner, has_test, self.outdir, self.outform,
+                        self.outform_test, self.lossform, self.npzfile, self.npzfile_test, self.repfile,
+                        self.repfile_test)
+
         ''' Run for all repeated experiments '''
         for i_exp in range(1, self.n_experiments + 1):
 
@@ -489,9 +504,8 @@ class TrainRunner:
             I_train, I_valid = validation_split(D_exp, FLAGS.val_part)
 
             ''' Run training loop '''
-            trainer = Train(CFR, sess_runner, D_exp, D_exp_test, i_exp, self.logfile, train_step, I_valid)
-            trainer.save_results(output_nodes, has_test, self.outdir, self.outform, self.outform_test, self.lossform,
-                                 self.npzfile, self.npzfile_test, self.repfile, self.repfile_test)
+            trainer.set_data(D_exp, D_exp_test, i_exp, self.logfile, train_step, I_valid)
+            trainer.save_results(output_nodes)
 
     def calc_repetitions(self):
         n_experiments = FLAGS.experiments
