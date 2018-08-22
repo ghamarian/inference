@@ -365,7 +365,7 @@ class Train:
 class TrainRunner:
     def __init__(self, outdir):
 
-        ''' Set up paths and start log '''
+        self.outdir = outdir
         self.npzfile = outdir + 'result'
         self.npzfile_test = outdir + 'result.test'
         self.repfile = outdir + 'reps'
@@ -374,13 +374,22 @@ class TrainRunner:
         self.outform_test = outdir + 'y_pred.test'
         self.lossform = outdir + 'loss'
         self.logfile = outdir + 'log.txt'
+        self.n_experiments = self.calc_repetitions()
+
+        self.set_random_seed()
+
+        save_config(self.outdir + 'config.txt')
+
+    def set_random_seed(self):
+        random.seed(FLAGS.seed)
+        tf.set_random_seed(FLAGS.seed)
+        np.random.seed(FLAGS.seed)
 
     def start_logs(self):
-
         f = open(self.logfile, 'w')
         f.close()
 
-    def run(self, outdir):
+    def run(self):
         """ Runs an experiment and stores result in outdir """
 
         self.start_logs()
@@ -394,12 +403,6 @@ class TrainRunner:
         else:
             dataform_test = None
 
-        ''' Set random seeds '''
-        random.seed(FLAGS.seed)
-        tf.set_random_seed(FLAGS.seed)
-        np.random.seed(FLAGS.seed)
-        ''' Save parameters '''
-        save_config(outdir + 'config.txt')
 
         log(self.logfile, 'Training with hyperparameters: alpha=%.2g, lambda=%.2g' % (FLAGS.p_alpha, FLAGS.p_lambda))
 
@@ -418,7 +421,8 @@ class TrainRunner:
 
         log(self.logfile, 'Training data: ' + datapath)
         if has_test:
-            log(self.logfile, 'Test data:     ' + datapath_test)
+            log(self.logfile, 'Test data: ' + datapath_test)
+
         D = load_data(datapath)
         D_test = None
         if has_test:
@@ -430,30 +434,18 @@ class TrainRunner:
 
         train_step = self.populate_train_step(CFR)
 
-
-        ''' Start Session '''
         sess_runner = SessionRunner(CFR)
 
-        ''' Set up for saving variables '''
         output_nodes = Output()
 
 
-
-        ''' Handle repetitions '''
-        n_experiments = FLAGS.experiments
-        if FLAGS.repetitions > 1:
-            if FLAGS.experiments > 1:
-                log(self.logfile, 'ERROR: Use of both repetitions and multiple experiments is currently not supported.')
-                sys.exit(1)
-            n_experiments = FLAGS.repetitions
-
         ''' Run for all repeated experiments '''
-        for i_exp in range(1, n_experiments + 1):
+        for i_exp in range(1, self.n_experiments + 1):
 
             if FLAGS.repetitions > 1:
                 log(self.logfile, 'Training on repeated initialization %d/%d...' % (i_exp, FLAGS.repetitions))
             else:
-                log(self.logfile, 'Training on experiment %d/%d...' % (i_exp, n_experiments))
+                log(self.logfile, 'Training on experiment %d/%d...' % (i_exp, self.n_experiments))
 
             ''' Load Data (if multiple repetitions, reuse first set)'''
 
@@ -476,7 +468,7 @@ class TrainRunner:
             out_losses = np.swapaxes(np.swapaxes(output_nodes.all_losses, 0, 2), 0, 1)
 
             ''' Store predictions '''
-            log(self.logfile, 'Saving result to %s...\n' % outdir)
+            log(self.logfile, 'Saving result to %s...\n' % self.outdir)
             if FLAGS.output_csv:
                 np.savetxt('%s_%d.csv' % (self.outform, i_exp), preds_train[-1], delimiter=',')
                 np.savetxt('%s_%d.csv' % (self.outform_test, i_exp), preds_test[-1], delimiter=',')
@@ -507,6 +499,14 @@ class TrainRunner:
                 if has_test:
                     np.savez(self.repfile_test, rep=reps_test)
 
+    def calc_repetitions(self):
+        n_experiments = FLAGS.experiments
+        if FLAGS.repetitions > 1:
+            if FLAGS.experiments > 1:
+                log(self.logfile, 'ERROR: Use of both repetitions and multiple experiments is currently not supported.')
+                sys.exit(1)
+            n_experiments = FLAGS.repetitions
+        return n_experiments
 
     def populate_train_step(self, CFR):
 
@@ -616,7 +616,7 @@ def main(argv=None):  # pylint: disable=unused-argument
     model = TrainRunner(outdir)
 
     try:
-        model.run(outdir)
+        model.run()
     except Exception as e:
         with open(outdir + 'error.txt', 'w') as errfile:
             errfile.write(''.join(traceback.format_exception(*sys.exc_info())))
