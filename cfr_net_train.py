@@ -178,14 +178,6 @@ class Train:
 
         ''' Set up loss feed_dicts'''
         self.sess_runner.set_feed_dicts(self.D, self.p_treated, self.I_train, self.I_valid)
-        # self.dict_factual = self.sess_runner.create_loss_feed_dict(self.p_treated, self.I_train, D)
-        #
-        # if FLAGS.val_part > 0:
-        #     self.dict_valid = self.sess_runner.create_loss_feed_dict(self.p_treated, self.I_valid, D)
-        #
-        # if self.D['HAVE_TRUTH']:
-        #     self.dict_cfactual = self.sess_runner.create_main_loss_feed_dict(self.I_train, 1 - self.D['t'][self.I_train, :],
-        #                                                     self.D['ycf'][self.I_train, :], D)
 
     def train(self):
 
