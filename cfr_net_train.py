@@ -75,7 +75,6 @@ class SessionRunner:
     def __init__(self, CFR):
         self.CFR = CFR
         self.sess = tf.Session()
-        self.sess.run(tf.global_variables_initializer())
 
     def create_main_loss_feed_dict(self, train, t_i_train_, cfr_y, D):
         dict_cfactual = {self.CFR.x: D['x'][train, :],
@@ -84,6 +83,9 @@ class SessionRunner:
                          self.CFR.do_in: 1.0,
                          self.CFR.do_out: 1.0}
         return dict_cfactual
+
+    def initialize_global_variables(self):
+        self.sess.run(tf.global_variables_initializer())
 
     def create_loss_feed_dict(self, p_treated, train_or_valid, D):
         result = self.create_main_loss_feed_dict(train_or_valid, D['t'][train_or_valid, :],
@@ -159,7 +161,7 @@ class SessionRunner:
 
 class Train:
     def __init__(self, CFR, sess_runner, has_test, outdir, outform, outform_test, lossform, npzfile, npzfile_test,
-                 repfile, repfile_test):
+                 repfile, repfile_test, logfile,):
         self.repfile = repfile
         self.npzfile_test = npzfile_test
         self.npzfile = npzfile
@@ -171,18 +173,41 @@ class Train:
         self.has_test = has_test
         self.CFR = CFR
         self.sess_runner = sess_runner
+        self.train_step = self.populate_train_step(CFR)
+        self.sess_runner.initialize_global_variables()
+        self.logfile = logfile
 
         if FLAGS.varsel:
             self.all_weights = None
             self.all_beta = None
 
-    def set_data(self, D, D_test, i_exp, logfile, train_step, I_valid):
+    def populate_train_step(self, CFR):
+
+        global_step = tf.Variable(0, trainable=False)
+        lr = tf.train.exponential_decay(FLAGS.lrate, global_step, NUM_ITERATIONS_PER_DECAY, FLAGS.lrate_decay,
+                                        staircase=True)
+
+        if FLAGS.optimizer == 'Adagrad':
+            opt = tf.train.AdagradOptimizer(lr)
+        elif FLAGS.optimizer == 'GradientDescent':
+            opt = tf.train.GradientDescentOptimizer(lr)
+        elif FLAGS.optimizer == 'Adam':
+            opt = tf.train.AdamOptimizer(lr)
+        else:
+            opt = tf.train.RMSPropOptimizer(lr, FLAGS.decay)
+
+        ''' Unused gradient clipping '''
+        # gvs = opt.compute_gradients(CFR.tot_loss)
+        # capped_gvs = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in gvs]
+        # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
+        train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
+        return train_step
+
+    def set_data(self, D, D_test, i_exp,  I_valid):
         self.D = D
         self.D_test = D_test
         self.i_exp = i_exp
-        self.logfile = logfile
         self.I_valid = I_valid
-        self.train_step = train_step
 
         ''' Train/validation split '''
         n = self.D['x'].shape[0]
@@ -478,15 +503,13 @@ class TrainRunner:
 
         CFR = self.creat_model(D)
 
-        train_step = self.populate_train_step(CFR)
-
         sess_runner = SessionRunner(CFR)
 
         output_nodes = Output()
 
         trainer = Train(CFR, sess_runner, has_test, self.outdir, self.outform,
                         self.outform_test, self.lossform, self.npzfile, self.npzfile_test, self.repfile,
-                        self.repfile_test)
+                        self.repfile_test, self.logfile)
 
         ''' Run for all repeated experiments '''
         for i_exp in range(1, self.n_experiments + 1):
@@ -504,7 +527,7 @@ class TrainRunner:
             I_train, I_valid = validation_split(D_exp, FLAGS.val_part)
 
             ''' Run training loop '''
-            trainer.set_data(D_exp, D_exp_test, i_exp, self.logfile, train_step, I_valid)
+            trainer.set_data(D_exp, D_exp_test, i_exp, I_valid)
             trainer.save_results(output_nodes)
 
     def calc_repetitions(self):
@@ -516,27 +539,7 @@ class TrainRunner:
             n_experiments = FLAGS.repetitions
         return n_experiments
 
-    def populate_train_step(self, CFR):
 
-        global_step = tf.Variable(0, trainable=False)
-        lr = tf.train.exponential_decay(FLAGS.lrate, global_step, NUM_ITERATIONS_PER_DECAY, FLAGS.lrate_decay,
-                                        staircase=True)
-
-        if FLAGS.optimizer == 'Adagrad':
-            opt = tf.train.AdagradOptimizer(lr)
-        elif FLAGS.optimizer == 'GradientDescent':
-            opt = tf.train.GradientDescentOptimizer(lr)
-        elif FLAGS.optimizer == 'Adam':
-            opt = tf.train.AdamOptimizer(lr)
-        else:
-            opt = tf.train.RMSPropOptimizer(lr, FLAGS.decay)
-
-        ''' Unused gradient clipping '''
-        # gvs = opt.compute_gradients(CFR.tot_loss)
-        # capped_gvs = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in gvs]
-        # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
-        train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
-        return train_step
 
     def creat_model(self, D):
 
