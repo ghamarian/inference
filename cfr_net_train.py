@@ -101,7 +101,7 @@ class SessionRunner:
 
         if D['HAVE_TRUTH']:
             self.dict_cfactual = self.create_main_loss_feed_dict(I_train, 1 - D['t'][I_train, :],
-                                                                             D['ycf'][I_train, :], D)
+                                                                 D['ycf'][I_train, :], D)
 
     def _run_losses(self, dict_factual_or_cfactual):
         obj_loss, f_error, imb_err = self.sess.run([self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist],
@@ -143,11 +143,13 @@ class SessionRunner:
                                                   self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
 
     def run_descriptive_stats(self, x_batch, t_batch):
-        m_statistics = self.sess.run(cfr.pop_dist(self.CFR.x, self.CFR.t), feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch})
+        m_statistics = self.sess.run(cfr.pop_dist(self.CFR.x, self.CFR.t),
+                                     feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch})
         return m_statistics
 
     def run_h_rep(self, d_x_, do_in, do_out):
-        return self.sess.run([self.CFR.h_rep], feed_dict={self.CFR.x: d_x_, self.CFR.do_in: do_in, self.CFR.do_out: do_out})
+        return self.sess.run([self.CFR.h_rep],
+                             feed_dict={self.CFR.x: d_x_, self.CFR.do_in: do_in, self.CFR.do_out: do_out})
 
     def run_weights(self):
         return self.sess.run(self.CFR.weights_in[0])
@@ -219,7 +221,6 @@ class Train:
 
         return losses, preds_train, preds_test, reps, reps_test
 
-
     def should_compute_loss(self, i):
         ''' Compute loss every N iterations '''
         return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
@@ -234,7 +235,7 @@ class Train:
             self.gradient_step(p_treated, t_batch, x_batch, y_batch)
 
         ''' Project variable selection weights '''
-        if FLAGS.varsel: #TODO
+        if FLAGS.varsel:  # TODO
             wip = simplex_project(self.sess_runner.run_weights(), 1)
             self.sess_runner.run_projection(wip)
 
@@ -343,134 +344,200 @@ class Train:
         return (FLAGS.pred_output_delay > 0 and i % FLAGS.pred_output_delay == 0) or i == FLAGS.iterations - 1
 
 
-def run(outdir):
-    """ Runs an experiment and stores result in outdir """
+class TrainRunner:
+    def __init__(self, outdir):
 
-    ''' Set up paths and start log '''
-    npzfile = outdir + 'result'
-    npzfile_test = outdir + 'result.test'
-    repfile = outdir + 'reps'
-    repfile_test = outdir + 'reps.test'
-    outform = outdir + 'y_pred'
-    outform_test = outdir + 'y_pred.test'
-    lossform = outdir + 'loss'
-    logfile = outdir + 'log.txt'
-    f = open(logfile, 'w')
-    f.close()
-    dataform = FLAGS.datadir + FLAGS.dataform
+        ''' Set up paths and start log '''
+        self.npzfile = outdir + 'result'
+        self.npzfile_test = outdir + 'result.test'
+        self.repfile = outdir + 'reps'
+        self.repfile_test = outdir + 'reps.test'
+        self.outform = outdir + 'y_pred'
+        self.outform_test = outdir + 'y_pred.test'
+        self.lossform = outdir + 'loss'
+        self.logfile = outdir + 'log.txt'
 
-    has_test = False
-    if not FLAGS.data_test == '':  # if test set supplied
-        has_test = True
-        dataform_test = FLAGS.datadir + FLAGS.data_test
+    def start_logs(self):
 
-    ''' Set random seeds '''
-    random.seed(FLAGS.seed)
-    tf.set_random_seed(FLAGS.seed)
-    np.random.seed(FLAGS.seed)
+        f = open(self.logfile, 'w')
+        f.close()
 
-    ''' Save parameters '''
-    save_config(outdir + 'config.txt')
+    def run(self, outdir):
+        """ Runs an experiment and stores result in outdir """
 
-    log(logfile, 'Training with hyperparameters: alpha=%.2g, lambda=%.2g' % (FLAGS.p_alpha, FLAGS.p_lambda))
+        self.start_logs()
+        dataform = FLAGS.datadir + FLAGS.dataform
 
-    ''' Load Data '''
-    npz_input = False
-    if dataform[-3:] == 'npz':
-        npz_input = True
-    if npz_input:
-        datapath = dataform
-        if has_test:
-            datapath_test = dataform_test
-    else:
-        datapath = dataform % 1
-        if has_test:
-            datapath_test = dataform_test % 1
-
-    log(logfile, 'Training data: ' + datapath)
-    if has_test:
-        log(logfile, 'Test data:     ' + datapath_test)
-    D = load_data(datapath)
-    D_test = None
-    if has_test:
-        D_test = load_data(datapath_test)
-
-    log(logfile, 'Loaded data with shape [%d,%d]' % (D['n'], D['dim']))
-
-
-    ''' Initialize input placeholders '''
-    x = tf.placeholder("float", shape=[None, D['dim']], name='x')  # Features
-    t = tf.placeholder("float", shape=[None, 1], name='t')  # Treatent
-    y_ = tf.placeholder("float", shape=[None, 1], name='y_')  # Outcome
-
-    ''' Parameter placeholders '''
-    r_alpha = tf.placeholder("float", name='r_alpha')
-    r_lambda = tf.placeholder("float", name='r_lambda')
-    do_in = tf.placeholder("float", name='dropout_in')
-    do_out = tf.placeholder("float", name='dropout_out')
-    p = tf.placeholder("float", name='p_treated')
-
-    ''' Define model graph '''
-    log(logfile, 'Defining graph...\n')
-    dims = [D['dim'], FLAGS.dim_in, FLAGS.dim_out]
-    CFR = cfr.cfr_net(x, t, y_, p, FLAGS, r_alpha, r_lambda, do_in, do_out, dims)
-
-
-    ''' Set up optimizer '''
-    global_step = tf.Variable(0, trainable=False)
-    lr = tf.train.exponential_decay(FLAGS.lrate, global_step, \
-                                    NUM_ITERATIONS_PER_DECAY, FLAGS.lrate_decay, staircase=True)
-
-    opt = None
-    if FLAGS.optimizer == 'Adagrad':
-        opt = tf.train.AdagradOptimizer(lr)
-    elif FLAGS.optimizer == 'GradientDescent':
-        opt = tf.train.GradientDescentOptimizer(lr)
-    elif FLAGS.optimizer == 'Adam':
-        opt = tf.train.AdamOptimizer(lr)
-    else:
-        opt = tf.train.RMSPropOptimizer(lr, FLAGS.decay)
-
-    ''' Unused gradient clipping '''
-    # gvs = opt.compute_gradients(CFR.tot_loss)
-    # capped_gvs = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in gvs]
-    # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
-
-    train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
-
-    ''' Start Session '''
-    # sess = tf.Session()
-    sess_runner = SessionRunner(CFR, train_step)
-
-    ''' Set up for saving variables '''
-    all_losses = []
-    all_preds_train = []
-    all_preds_test = []
-    all_valid = []
-    if FLAGS.varsel:
-        all_weights = None
-        all_beta = None
-
-    all_preds_test = []
-
-    ''' Handle repetitions '''
-    n_experiments = FLAGS.experiments
-    if FLAGS.repetitions > 1:
-        if FLAGS.experiments > 1:
-            log(logfile, 'ERROR: Use of both repetitions and multiple experiments is currently not supported.')
-            sys.exit(1)
-        n_experiments = FLAGS.repetitions
-
-    ''' Run for all repeated experiments '''
-    for i_exp in range(1, n_experiments + 1):
-
-        if FLAGS.repetitions > 1:
-            log(logfile, 'Training on repeated initialization %d/%d...' % (i_exp, FLAGS.repetitions))
+        # ToDO
+        has_test = False
+        if not FLAGS.data_test == '':  # if test set supplied
+            has_test = True
+            dataform_test = FLAGS.datadir + FLAGS.data_test
         else:
-            log(logfile, 'Training on experiment %d/%d...' % (i_exp, n_experiments))
+            dataform_test = None
 
-        ''' Load Data (if multiple repetitions, reuse first set)'''
+        ''' Set random seeds '''
+        random.seed(FLAGS.seed)
+        tf.set_random_seed(FLAGS.seed)
+        np.random.seed(FLAGS.seed)
+        ''' Save parameters '''
+        save_config(outdir + 'config.txt')
 
+        log(self.logfile, 'Training with hyperparameters: alpha=%.2g, lambda=%.2g' % (FLAGS.p_alpha, FLAGS.p_lambda))
+
+        ''' Load Data '''
+        npz_input = False
+        if dataform[-3:] == 'npz':
+            npz_input = True
+        if npz_input:
+            datapath = dataform
+            if has_test:
+                datapath_test = dataform_test
+        else:
+            datapath = dataform % 1
+            if has_test:
+                datapath_test = dataform_test % 1
+
+        log(self.logfile, 'Training data: ' + datapath)
+        if has_test:
+            log(self.logfile, 'Test data:     ' + datapath_test)
+        D = load_data(datapath)
+        D_test = None
+        if has_test:
+            D_test = load_data(datapath_test)
+
+        log(self.logfile, 'Loaded data with shape [%d,%d]' % (D['n'], D['dim']))
+
+        ''' Initialize input placeholders '''
+        x = tf.placeholder("float", shape=[None, D['dim']], name='x')  # Features
+        t = tf.placeholder("float", shape=[None, 1], name='t')  # Treatent
+        y_ = tf.placeholder("float", shape=[None, 1], name='y_')  # Outcome
+
+        ''' Parameter placeholders '''
+        r_alpha = tf.placeholder("float", name='r_alpha')
+        r_lambda = tf.placeholder("float", name='r_lambda')
+        do_in = tf.placeholder("float", name='dropout_in')
+        do_out = tf.placeholder("float", name='dropout_out')
+        p = tf.placeholder("float", name='p_treated')
+
+        ''' Define model graph '''
+        log(self.logfile, 'Defining graph...\n')
+        dims = [D['dim'], FLAGS.dim_in, FLAGS.dim_out]
+        CFR = cfr.cfr_net(x, t, y_, p, FLAGS, r_alpha, r_lambda, do_in, do_out, dims)
+
+        ''' Set up optimizer '''
+        global_step = tf.Variable(0, trainable=False)
+        lr = tf.train.exponential_decay(FLAGS.lrate, global_step, \
+                                        NUM_ITERATIONS_PER_DECAY, FLAGS.lrate_decay, staircase=True)
+
+        opt = None
+        if FLAGS.optimizer == 'Adagrad':
+            opt = tf.train.AdagradOptimizer(lr)
+        elif FLAGS.optimizer == 'GradientDescent':
+            opt = tf.train.GradientDescentOptimizer(lr)
+        elif FLAGS.optimizer == 'Adam':
+            opt = tf.train.AdamOptimizer(lr)
+        else:
+            opt = tf.train.RMSPropOptimizer(lr, FLAGS.decay)
+
+        ''' Unused gradient clipping '''
+        # gvs = opt.compute_gradients(CFR.tot_loss)
+        # capped_gvs = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in gvs]
+        # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
+
+        train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
+
+        ''' Start Session '''
+        # sess = tf.Session()
+        sess_runner = SessionRunner(CFR, train_step)
+
+        ''' Set up for saving variables '''
+        output_nodes = Output()
+
+        # all_losses = []
+        # all_preds_train = []
+        # all_preds_test = []
+        # all_valid = []
+
+        if FLAGS.varsel:
+            all_weights = None
+            all_beta = None
+
+        ''' Handle repetitions '''
+        n_experiments = FLAGS.experiments
+        if FLAGS.repetitions > 1:
+            if FLAGS.experiments > 1:
+                log(self.logfile, 'ERROR: Use of both repetitions and multiple experiments is currently not supported.')
+                sys.exit(1)
+            n_experiments = FLAGS.repetitions
+
+        ''' Run for all repeated experiments '''
+        for i_exp in range(1, n_experiments + 1):
+
+            if FLAGS.repetitions > 1:
+                log(self.logfile, 'Training on repeated initialization %d/%d...' % (i_exp, FLAGS.repetitions))
+            else:
+                log(self.logfile, 'Training on experiment %d/%d...' % (i_exp, n_experiments))
+
+            ''' Load Data (if multiple repetitions, reuse first set)'''
+
+            D_exp, D_exp_test = self.prepare_data(D, D_test, dataform, dataform_test, has_test, i_exp, npz_input)
+
+            ''' Split into training and validation sets '''
+            I_train, I_valid = validation_split(D_exp, FLAGS.val_part)
+
+            ''' Run training loop '''
+            trainer = Train(CFR, sess_runner, D_exp, D_exp_test, i_exp, self.logfile, train_step, I_valid)
+            losses, preds_train, preds_test, reps, reps_test = \
+                trainer.train()
+
+            ''' Collect all reps '''
+            output_nodes.collect_all_reps(losses, preds_test, preds_train)
+
+            ''' Fix shape for output (n_units, dim, n_reps, n_outputs) '''
+            out_preds_train = np.swapaxes(np.swapaxes(output_nodes.all_preds_train, 1, 3), 0, 2)
+            if has_test:
+                out_preds_test = np.swapaxes(np.swapaxes(output_nodes.all_preds_test, 1, 3), 0, 2)
+            out_losses = np.swapaxes(np.swapaxes(output_nodes.all_losses, 0, 2), 0, 1)
+
+            ''' Store predictions '''
+            log(self.logfile, 'Saving result to %s...\n' % outdir)
+            if FLAGS.output_csv:
+                np.savetxt('%s_%d.csv' % (self.outform, i_exp), preds_train[-1], delimiter=',')
+                np.savetxt('%s_%d.csv' % (self.outform_test, i_exp), preds_test[-1], delimiter=',')
+                np.savetxt('%s_%d.csv' % (self.lossform, i_exp), losses, delimiter=',')
+
+            ''' Compute weights if doing variable selection '''
+            if FLAGS.varsel:
+                if i_exp == 1:
+                    all_weights = sess_runner.run_weights()
+                    all_beta = sess_runner.run_weights_pred()
+                else:
+                    all_weights = np.dstack((all_weights, sess_runner.run_weights()))
+                    all_beta = np.dstack((all_beta, sess_runner.run_weights_pred()))
+
+            ''' Save results and predictions '''
+
+            output_nodes.save_all_valid(I_valid)
+
+            if FLAGS.varsel:
+                np.savez(self.npzfile, pred=out_preds_train, loss=out_losses, w=all_weights, beta=all_beta,
+                         val=np.array(output_nodes.all_valid))
+            else:
+                np.savez(self.npzfile, pred=out_preds_train, loss=out_losses,
+                         val=np.array(output_nodes.get_all_valid()))
+
+            if has_test:
+                np.savez(self.npzfile_test, pred=out_preds_test)
+
+            ''' Save representations '''
+            if FLAGS.save_rep and i_exp == 1:
+                np.savez(self.repfile, rep=reps)
+
+                if has_test:
+                    np.savez(self.repfile_test, rep=reps_test)
+
+    def prepare_data(self, D, D_test, dataform, dataform_test, has_test, i_exp, npz_input):
         if i_exp == 1 or FLAGS.experiments > 1:
             D_exp_test = None
             if npz_input:
@@ -502,59 +569,27 @@ def run(outdir):
             D_exp['HAVE_TRUTH'] = D['HAVE_TRUTH']
             if has_test:
                 D_exp_test['HAVE_TRUTH'] = D_test['HAVE_TRUTH']
+        return D_exp, D_exp_test
 
-        ''' Split into training and validation sets '''
-        I_train, I_valid = validation_split(D_exp, FLAGS.val_part)
 
-        ''' Run training loop '''
-        trainer = Train(CFR, sess_runner, D_exp, D_exp_test, i_exp, logfile, train_step, I_valid)
-        losses, preds_train, preds_test, reps, reps_test = \
-            trainer.train()
+class Output:
+    def __init__(self):
+        ''' Set up for saving variables '''
+        self.all_losses = []
+        self.all_preds_train = []
+        self.all_preds_test = []
+        self.all_valid = []
 
-        ''' Collect all reps '''
-        all_preds_train.append(preds_train)
-        all_preds_test.append(preds_test)
-        all_losses.append(losses)
+    def collect_all_reps(self, losses, preds_test, preds_train):
+        self.all_preds_train.append(preds_train)
+        self.all_preds_test.append(preds_test)
+        self.all_losses.append(losses)
 
-        ''' Fix shape for output (n_units, dim, n_reps, n_outputs) '''
-        out_preds_train = np.swapaxes(np.swapaxes(all_preds_train, 1, 3), 0, 2)
-        if has_test:
-            out_preds_test = np.swapaxes(np.swapaxes(all_preds_test, 1, 3), 0, 2)
-        out_losses = np.swapaxes(np.swapaxes(all_losses, 0, 2), 0, 1)
+    def save_all_valid(self, I_valid):
+        self.all_valid.append(I_valid)
 
-        ''' Store predictions '''
-        log(logfile, 'Saving result to %s...\n' % outdir)
-        if FLAGS.output_csv:
-            np.savetxt('%s_%d.csv' % (outform, i_exp), preds_train[-1], delimiter=',')
-            np.savetxt('%s_%d.csv' % (outform_test, i_exp), preds_test[-1], delimiter=',')
-            np.savetxt('%s_%d.csv' % (lossform, i_exp), losses, delimiter=',')
-
-        ''' Compute weights if doing variable selection '''
-        if FLAGS.varsel:
-            if i_exp == 1:
-                all_weights = sess_runner.run_weights()
-                all_beta = sess_runner.run_weights_pred()
-            else:
-                all_weights = np.dstack((all_weights, sess_runner.run_weights()))
-                all_beta = np.dstack((all_beta, sess_runner.run_weights_pred()))
-
-        ''' Save results and predictions '''
-        all_valid.append(I_valid)
-        if FLAGS.varsel:
-            np.savez(npzfile, pred=out_preds_train, loss=out_losses, w=all_weights, beta=all_beta,
-                     val=np.array(all_valid))
-        else:
-            np.savez(npzfile, pred=out_preds_train, loss=out_losses, val=np.array(all_valid))
-
-        if has_test:
-            np.savez(npzfile_test, pred=out_preds_test)
-
-        ''' Save representations '''
-        if FLAGS.save_rep and i_exp == 1:
-            np.savez(repfile, rep=reps)
-
-            if has_test:
-                np.savez(repfile_test, rep=reps_test)
+    def get_all_valid(self):
+        return self.all_valid
 
 
 def main(argv=None):  # pylint: disable=unused-argument
@@ -562,9 +597,10 @@ def main(argv=None):  # pylint: disable=unused-argument
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S-%f")
     outdir = FLAGS.outdir + '/results_' + timestamp + '/'
     os.mkdir(outdir)
+    model = TrainRunner(outdir)
 
     try:
-        run(outdir)
+        model.run(outdir)
     except Exception as e:
         with open(outdir + 'error.txt', 'w') as errfile:
             errfile.write(''.join(traceback.format_exception(*sys.exc_info())))
