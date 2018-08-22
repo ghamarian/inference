@@ -72,9 +72,8 @@ if FLAGS.debug:
 
 
 class SessionRunner:
-    def __init__(self, CFR, train_step):
+    def __init__(self, CFR):
         self.CFR = CFR
-        self.train_step = train_step
         self.sess = tf.Session()
         self.sess.run(tf.global_variables_initializer())
 
@@ -136,8 +135,8 @@ class SessionRunner:
 
         return y_pred
 
-    def run_train_step(self, x_batch, t_batch, y_batch, p_treated):
-        self.sess.run(self.train_step, feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch, self.CFR.y_: y_batch,
+    def run_train_step(self, train_step, x_batch, t_batch, y_batch, p_treated):
+        self.sess.run(train_step, feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch, self.CFR.y_: y_batch,
                                                   self.CFR.do_in: FLAGS.dropout_in,
                                                   self.CFR.do_out: FLAGS.dropout_out, self.CFR.r_alpha: FLAGS.p_alpha,
                                                   self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
@@ -181,6 +180,10 @@ class Train:
         ''' Set up loss feed_dicts'''
         self.sess_runner.set_feed_dicts(self.D, self.p_treated, self.I_train, self.I_valid)
 
+        if FLAGS.varsel:
+            self.all_weights = None
+            self.all_beta = None
+
     def train(self):
 
         ''' Set up for storing predictions '''
@@ -213,6 +216,7 @@ class Train:
 
         reps = []
         reps_test = []
+
 
         ''' Train for multiple iterations '''
         for i in range(FLAGS.iterations):
@@ -310,7 +314,7 @@ class Train:
         return acc
 
     def gradient_step(self, p_treated, t_batch, x_batch, y_batch):
-        self.sess_runner.run_train_step(x_batch, t_batch, y_batch, p_treated)
+        self.sess_runner.run_train_step(self.train_step, x_batch, t_batch, y_batch, p_treated)
 
     def log_stats(self, t_batch, x_batch):
         M = self.sess_runner(x_batch, t_batch)
@@ -342,6 +346,20 @@ class Train:
     def should_predict_in_M_iteration(self, i):
         ''' Compute predictions every M iterations '''
         return (FLAGS.pred_output_delay > 0 and i % FLAGS.pred_output_delay == 0) or i == FLAGS.iterations - 1
+
+    def accumulate_weights(self):
+        if self.i_exp == 1:
+            self.all_weights = self.sess_runner.run_weights()
+            self.all_beta = self.sess_runner.run_weights_pred()
+        else:
+            self.all_weights = np.dstack((self.all_weights, self.sess_runner.run_weights()))
+            self.all_beta = np.dstack((self.all_beta, self.sess_runner.run_weights_pred()))
+
+    def get_all_beta(self):
+        return self.all_beta
+
+    def get_all_weights(self):
+        return self.all_weights
 
 
 class TrainRunner:
@@ -408,60 +426,18 @@ class TrainRunner:
 
         log(self.logfile, 'Loaded data with shape [%d,%d]' % (D['n'], D['dim']))
 
-        ''' Initialize input placeholders '''
-        x = tf.placeholder("float", shape=[None, D['dim']], name='x')  # Features
-        t = tf.placeholder("float", shape=[None, 1], name='t')  # Treatent
-        y_ = tf.placeholder("float", shape=[None, 1], name='y_')  # Outcome
+        CFR = self.creat_model(D)
 
-        ''' Parameter placeholders '''
-        r_alpha = tf.placeholder("float", name='r_alpha')
-        r_lambda = tf.placeholder("float", name='r_lambda')
-        do_in = tf.placeholder("float", name='dropout_in')
-        do_out = tf.placeholder("float", name='dropout_out')
-        p = tf.placeholder("float", name='p_treated')
+        train_step = self.populate_train_step(CFR)
 
-        ''' Define model graph '''
-        log(self.logfile, 'Defining graph...\n')
-        dims = [D['dim'], FLAGS.dim_in, FLAGS.dim_out]
-        CFR = cfr.cfr_net(x, t, y_, p, FLAGS, r_alpha, r_lambda, do_in, do_out, dims)
-
-        ''' Set up optimizer '''
-        global_step = tf.Variable(0, trainable=False)
-        lr = tf.train.exponential_decay(FLAGS.lrate, global_step, \
-                                        NUM_ITERATIONS_PER_DECAY, FLAGS.lrate_decay, staircase=True)
-
-        opt = None
-        if FLAGS.optimizer == 'Adagrad':
-            opt = tf.train.AdagradOptimizer(lr)
-        elif FLAGS.optimizer == 'GradientDescent':
-            opt = tf.train.GradientDescentOptimizer(lr)
-        elif FLAGS.optimizer == 'Adam':
-            opt = tf.train.AdamOptimizer(lr)
-        else:
-            opt = tf.train.RMSPropOptimizer(lr, FLAGS.decay)
-
-        ''' Unused gradient clipping '''
-        # gvs = opt.compute_gradients(CFR.tot_loss)
-        # capped_gvs = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in gvs]
-        # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
-
-        train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
 
         ''' Start Session '''
-        # sess = tf.Session()
-        sess_runner = SessionRunner(CFR, train_step)
+        sess_runner = SessionRunner(CFR)
 
         ''' Set up for saving variables '''
         output_nodes = Output()
 
-        # all_losses = []
-        # all_preds_train = []
-        # all_preds_test = []
-        # all_valid = []
 
-        if FLAGS.varsel:
-            all_weights = None
-            all_beta = None
 
         ''' Handle repetitions '''
         n_experiments = FLAGS.experiments
@@ -488,8 +464,7 @@ class TrainRunner:
 
             ''' Run training loop '''
             trainer = Train(CFR, sess_runner, D_exp, D_exp_test, i_exp, self.logfile, train_step, I_valid)
-            losses, preds_train, preds_test, reps, reps_test = \
-                trainer.train()
+            losses, preds_train, preds_test, reps, reps_test = trainer.train()
 
             ''' Collect all reps '''
             output_nodes.collect_all_reps(losses, preds_test, preds_train)
@@ -509,19 +484,14 @@ class TrainRunner:
 
             ''' Compute weights if doing variable selection '''
             if FLAGS.varsel:
-                if i_exp == 1:
-                    all_weights = sess_runner.run_weights()
-                    all_beta = sess_runner.run_weights_pred()
-                else:
-                    all_weights = np.dstack((all_weights, sess_runner.run_weights()))
-                    all_beta = np.dstack((all_beta, sess_runner.run_weights_pred()))
+                trainer.accumulate_weights()
 
             ''' Save results and predictions '''
 
             output_nodes.save_all_valid(I_valid)
 
             if FLAGS.varsel:
-                np.savez(self.npzfile, pred=out_preds_train, loss=out_losses, w=all_weights, beta=all_beta,
+                np.savez(self.npzfile, pred=out_preds_train, loss=out_losses, w=trainer.get_all_weights(), beta=trainer.get_all_beta(),
                          val=np.array(output_nodes.all_valid))
             else:
                 np.savez(self.npzfile, pred=out_preds_train, loss=out_losses,
@@ -536,6 +506,52 @@ class TrainRunner:
 
                 if has_test:
                     np.savez(self.repfile_test, rep=reps_test)
+
+
+    def populate_train_step(self, CFR):
+
+        global_step = tf.Variable(0, trainable=False)
+        lr = tf.train.exponential_decay(FLAGS.lrate, global_step, NUM_ITERATIONS_PER_DECAY, FLAGS.lrate_decay,
+                                        staircase=True)
+
+        if FLAGS.optimizer == 'Adagrad':
+            opt = tf.train.AdagradOptimizer(lr)
+        elif FLAGS.optimizer == 'GradientDescent':
+            opt = tf.train.GradientDescentOptimizer(lr)
+        elif FLAGS.optimizer == 'Adam':
+            opt = tf.train.AdamOptimizer(lr)
+        else:
+            opt = tf.train.RMSPropOptimizer(lr, FLAGS.decay)
+
+        ''' Unused gradient clipping '''
+        # gvs = opt.compute_gradients(CFR.tot_loss)
+        # capped_gvs = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in gvs]
+        # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
+        train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
+        return train_step
+
+
+
+    def creat_model(self, D):
+
+        ''' Initialize input placeholders '''
+        x = tf.placeholder("float", shape=[None, D['dim']], name='x')  # Features
+        t = tf.placeholder("float", shape=[None, 1], name='t')  # Treatent
+        y_ = tf.placeholder("float", shape=[None, 1], name='y_')  # Outcome
+
+        ''' Parameter placeholders '''
+        r_alpha = tf.placeholder("float", name='r_alpha')
+        r_lambda = tf.placeholder("float", name='r_lambda')
+        do_in = tf.placeholder("float", name='dropout_in')
+        do_out = tf.placeholder("float", name='dropout_out')
+        p = tf.placeholder("float", name='p_treated')
+
+        ''' Define model graph '''
+        log(self.logfile, 'Defining graph...\n')
+        dims = [D['dim'], FLAGS.dim_in, FLAGS.dim_out]
+        CFR = cfr.cfr_net(x, t, y_, p, FLAGS, r_alpha, r_lambda, do_in, do_out, dims)
+
+        return CFR
 
     def prepare_data(self, D, D_test, dataform, dataform_test, has_test, i_exp, npz_input):
         if i_exp == 1 or FLAGS.experiments > 1:
