@@ -137,9 +137,9 @@ class SessionRunner:
 
     def run_train_step(self, train_step, x_batch, t_batch, y_batch, p_treated):
         self.sess.run(train_step, feed_dict={self.CFR.x: x_batch, self.CFR.t: t_batch, self.CFR.y_: y_batch,
-                                                  self.CFR.do_in: FLAGS.dropout_in,
-                                                  self.CFR.do_out: FLAGS.dropout_out, self.CFR.r_alpha: FLAGS.p_alpha,
-                                                  self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
+                                             self.CFR.do_in: FLAGS.dropout_in,
+                                             self.CFR.do_out: FLAGS.dropout_out, self.CFR.r_alpha: FLAGS.p_alpha,
+                                             self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
 
     def run_descriptive_stats(self, x_batch, t_batch):
         m_statistics = self.sess.run(cfr.pop_dist(self.CFR.x, self.CFR.t),
@@ -216,7 +216,6 @@ class Train:
 
         reps = []
         reps_test = []
-
 
         ''' Train for multiple iterations '''
         for i in range(FLAGS.iterations):
@@ -361,6 +360,43 @@ class Train:
     def get_all_weights(self):
         return self.all_weights
 
+    def save_results(self, output_nodes, has_test, outdir, outform, outform_test, lossform, npzfile, npzfile_test,
+                     repfile, repfile_test):
+
+        losses, preds_train, preds_test, reps, reps_test = self.train()
+
+        output_nodes.collect_all_reps(losses, preds_test, preds_train)
+        ''' Fix shape for output (n_units, dim, n_reps, n_outputs) '''
+        out_preds_train = np.swapaxes(np.swapaxes(output_nodes.all_preds_train, 1, 3), 0, 2)
+        if has_test:
+            out_preds_test = np.swapaxes(np.swapaxes(output_nodes.all_preds_test, 1, 3), 0, 2)
+        out_losses = np.swapaxes(np.swapaxes(output_nodes.all_losses, 0, 2), 0, 1)
+        ''' Store predictions '''
+        log(self.logfile, 'Saving result to %s...\n' % outdir)
+
+        if FLAGS.output_csv:
+            np.savetxt('%s_%d.csv' % (outform, self.i_exp), preds_train[-1], delimiter=',')
+            np.savetxt('%s_%d.csv' % (outform_test, self.i_exp), preds_test[-1], delimiter=',')
+            np.savetxt('%s_%d.csv' % (lossform, self.i_exp), losses, delimiter=',')
+        ''' Save results and predictions '''
+        output_nodes.save_all_valid(self.I_valid)
+        ''' Compute weights if doing variable selection '''
+        if FLAGS.varsel:
+            self.accumulate_weights()
+            np.savez(npzfile, pred=out_preds_train, loss=out_losses, w=self.get_all_weights(),
+                     beta=self.get_all_beta(),
+                     val=output_nodes.get_all_valid())
+        else:
+            np.savez(npzfile, pred=out_preds_train, loss=out_losses, val=output_nodes.get_all_valid())
+        if has_test:
+            np.savez(npzfile_test, pred=out_preds_test)
+        ''' Save representations '''
+        if FLAGS.save_rep and self.i_exp == 1:
+            np.savez(repfile, rep=reps)
+
+            if has_test:
+                np.savez(repfile_test, rep=reps_test)
+
 
 class TrainRunner:
     def __init__(self, outdir):
@@ -403,7 +439,6 @@ class TrainRunner:
         else:
             dataform_test = None
 
-
         log(self.logfile, 'Training with hyperparameters: alpha=%.2g, lambda=%.2g' % (FLAGS.p_alpha, FLAGS.p_lambda))
 
         ''' Load Data '''
@@ -438,7 +473,6 @@ class TrainRunner:
 
         output_nodes = Output()
 
-
         ''' Run for all repeated experiments '''
         for i_exp in range(1, self.n_experiments + 1):
 
@@ -456,48 +490,8 @@ class TrainRunner:
 
             ''' Run training loop '''
             trainer = Train(CFR, sess_runner, D_exp, D_exp_test, i_exp, self.logfile, train_step, I_valid)
-            losses, preds_train, preds_test, reps, reps_test = trainer.train()
-
-            ''' Collect all reps '''
-            output_nodes.collect_all_reps(losses, preds_test, preds_train)
-
-            ''' Fix shape for output (n_units, dim, n_reps, n_outputs) '''
-            out_preds_train = np.swapaxes(np.swapaxes(output_nodes.all_preds_train, 1, 3), 0, 2)
-            if has_test:
-                out_preds_test = np.swapaxes(np.swapaxes(output_nodes.all_preds_test, 1, 3), 0, 2)
-            out_losses = np.swapaxes(np.swapaxes(output_nodes.all_losses, 0, 2), 0, 1)
-
-            ''' Store predictions '''
-            log(self.logfile, 'Saving result to %s...\n' % self.outdir)
-            if FLAGS.output_csv:
-                np.savetxt('%s_%d.csv' % (self.outform, i_exp), preds_train[-1], delimiter=',')
-                np.savetxt('%s_%d.csv' % (self.outform_test, i_exp), preds_test[-1], delimiter=',')
-                np.savetxt('%s_%d.csv' % (self.lossform, i_exp), losses, delimiter=',')
-
-            ''' Compute weights if doing variable selection '''
-            if FLAGS.varsel:
-                trainer.accumulate_weights()
-
-            ''' Save results and predictions '''
-
-            output_nodes.save_all_valid(I_valid)
-
-            if FLAGS.varsel:
-                np.savez(self.npzfile, pred=out_preds_train, loss=out_losses, w=trainer.get_all_weights(), beta=trainer.get_all_beta(),
-                         val=np.array(output_nodes.all_valid))
-            else:
-                np.savez(self.npzfile, pred=out_preds_train, loss=out_losses,
-                         val=np.array(output_nodes.get_all_valid()))
-
-            if has_test:
-                np.savez(self.npzfile_test, pred=out_preds_test)
-
-            ''' Save representations '''
-            if FLAGS.save_rep and i_exp == 1:
-                np.savez(self.repfile, rep=reps)
-
-                if has_test:
-                    np.savez(self.repfile_test, rep=reps_test)
+            trainer.save_results(output_nodes, has_test, self.outdir, self.outform, self.outform_test, self.lossform,
+                                 self.npzfile, self.npzfile_test, self.repfile, self.repfile_test)
 
     def calc_repetitions(self):
         n_experiments = FLAGS.experiments
@@ -529,8 +523,6 @@ class TrainRunner:
         # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
         train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
         return train_step
-
-
 
     def creat_model(self, D):
 
@@ -605,7 +597,7 @@ class Output:
         self.all_valid.append(I_valid)
 
     def get_all_valid(self):
-        return self.all_valid
+        return np.array(self.all_valid)
 
 
 def main(argv=None):  # pylint: disable=unused-argument
