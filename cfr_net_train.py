@@ -78,14 +78,48 @@ class SessionRunner:
         self.sess = tf.Session()
         self.sess.run(tf.global_variables_initializer())
 
-    def run_losses(self, dict_factual):
+    def create_main_loss_feed_dict(self, train, t_i_train_, cfr_y, D):
+        dict_cfactual = {self.CFR.x: D['x'][train, :],
+                         self.CFR.t: t_i_train_,
+                         self.CFR.y_: cfr_y,
+                         self.CFR.do_in: 1.0,
+                         self.CFR.do_out: 1.0}
+        return dict_cfactual
+
+    def create_loss_feed_dict(self, p_treated, train_or_valid, D):
+        result = self.create_main_loss_feed_dict(train_or_valid, D['t'][train_or_valid, :],
+                                                 D['yf'][train_or_valid, :], D)
+
+        result.update({self.CFR.r_alpha: FLAGS.p_alpha, self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
+        return result
+
+    def set_feed_dicts(self, D, p_treated, I_train, I_valid):
+        self.dict_factual = self.create_loss_feed_dict(p_treated, I_train, D)
+
+        if FLAGS.val_part > 0:
+            self.dict_valid = self.create_loss_feed_dict(p_treated, I_valid, D)
+
+        if D['HAVE_TRUTH']:
+            self.dict_cfactual = self.create_main_loss_feed_dict(I_train, 1 - D['t'][I_train, :],
+                                                                             D['ycf'][I_train, :], D)
+
+    def _run_losses(self, dict_factual_or_cfactual):
         obj_loss, f_error, imb_err = self.sess.run([self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist],
-                                                   feed_dict=dict_factual)
+                                                   feed_dict=dict_factual_or_cfactual)
 
         return obj_loss, f_error, imb_err
 
-    def run_pred_loss(self, dict_cfactual):
-        cf_error = self.sess.run(self.CFR.pred_loss, feed_dict=dict_cfactual)
+    def run_factual_losses(self):
+        return self._run_losses(self.dict_factual)
+
+    def run_counter_factual_losses(self):
+        return self._run_losses(self.dict_cfactual)
+
+    def run_valid_losses(self):
+        return self._run_losses(self.dict_valid)
+
+    def run_pred_loss(self):
+        cf_error = self.sess.run(self.CFR.pred_loss, feed_dict=self.dict_cfactual)
         return cf_error
 
     def run_projection(self, wip):
@@ -125,7 +159,6 @@ class SessionRunner:
 class Train:
     def __init__(self, CFR, sess_runner, D, D_test, i_exp, logfile, train_step, I_valid):
         self.CFR = CFR
-        # self.sess = sess
         self.sess_runner = sess_runner
         self.D = D
         self.D_test = D_test
@@ -134,27 +167,27 @@ class Train:
         self.I_valid = I_valid
         self.train_step = train_step
 
-    def train(self):
-        """ Trains a CFR model on supplied data """
-
         ''' Train/validation split '''
         n = self.D['x'].shape[0]
-        I = range(n)
-        I_train = list(set(I) - set(self.I_valid))
-        n_train = len(I_train)
+        self.I_train = list(set(range(n)) - set(self.I_valid))
+        self.n_train = len(self.I_train)
 
+        """ Trains a CFR model on supplied data """
         ''' Compute treatment probability'''
-        p_treated = np.mean(self.D['t'][I_train, :])
+        self.p_treated = np.mean(self.D['t'][self.I_train, :])
 
         ''' Set up loss feed_dicts'''
-        dict_factual = self.create_loss_feed_dict(p_treated, I_train)
+        self.sess_runner.set_feed_dicts(self.D, self.p_treated, self.I_train, self.I_valid)
+        # self.dict_factual = self.sess_runner.create_loss_feed_dict(self.p_treated, self.I_train, D)
+        #
+        # if FLAGS.val_part > 0:
+        #     self.dict_valid = self.sess_runner.create_loss_feed_dict(self.p_treated, self.I_valid, D)
+        #
+        # if self.D['HAVE_TRUTH']:
+        #     self.dict_cfactual = self.sess_runner.create_main_loss_feed_dict(self.I_train, 1 - self.D['t'][self.I_train, :],
+        #                                                     self.D['ycf'][self.I_train, :], D)
 
-        if FLAGS.val_part > 0:
-            dict_valid = self.create_loss_feed_dict(p_treated, self.I_valid)
-
-        if self.D['HAVE_TRUTH']:
-            dict_cfactual = self.create_main_loss_feed_dict(I_train, 1 - self.D['t'][I_train, :],
-                                                            self.D['ycf'][I_train, :])
+    def train(self):
 
         ''' Set up for storing predictions '''
         preds_train = []
@@ -162,22 +195,19 @@ class Train:
 
         ''' Compute losses '''
         losses = []
-        obj_loss, f_error, imb_err = self.sess_runner.run_losses(dict_factual)
+        obj_loss, f_error, imb_err = self.sess_runner.run_factual_losses()
 
         cf_error = np.nan
         if self.D['HAVE_TRUTH']:
-            cf_error = self.sess_runner.run_pred_loss(dict_cfactual)
+            cf_error = self.sess_runner.run_pred_loss()
 
         valid_obj = np.nan
         valid_imb = np.nan
         valid_f_error = np.nan
         if FLAGS.val_part > 0:
-            self.sess_runner.run_loss(dict_factual)
-            # valid_obj, valid_f_error, valid_imb = self.sess.run(
-            #     [self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist],
-            #     feed_dict=dict_valid)
+            self.sess_runner.run_factual_losses()
         else:
-            dict_valid = dict(
+            self.dict_valid = dict(
                 itertools.product(
                     [self.CFR.x, self.CFR.t, self.CFR.y_, self.CFR.do_in, self.CFR.do_out, self.CFR.r_alpha,
                      self.CFR.r_lambda, self.CFR.p_t],
@@ -192,32 +222,17 @@ class Train:
 
         ''' Train for multiple iterations '''
         for i in range(FLAGS.iterations):
-            objnan = self.train_once(I_train, dict_cfactual, dict_factual, dict_valid, i, losses, n_train, objnan,
-                                     p_treated, preds_test, preds_train, reps, reps_test)
+            objnan = self.train_once(self.I_train, i, losses, self.n_train, objnan, self.p_treated, preds_test,
+                                     preds_train, reps, reps_test)
 
         return losses, preds_train, preds_test, reps, reps_test
 
-    def create_main_loss_feed_dict(self, train, t_i_train_, cfr_y):
-        dict_cfactual = {self.CFR.x: self.D['x'][train, :],
-                         self.CFR.t: t_i_train_,
-                         self.CFR.y_: cfr_y,
-                         self.CFR.do_in: 1.0,
-                         self.CFR.do_out: 1.0}
-        return dict_cfactual
-
-    def create_loss_feed_dict(self, p_treated, train_or_valid):
-        result = self.create_main_loss_feed_dict(train_or_valid, self.D['t'][train_or_valid, :],
-                                                 self.D['yf'][train_or_valid, :])
-
-        result.update({self.CFR.r_alpha: FLAGS.p_alpha, self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
-        return result
 
     def should_compute_loss(self, i):
         ''' Compute loss every N iterations '''
         return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
 
-    def train_once(self, I_train, dict_cfactual, dict_factual, dict_valid, i, losses, n_train, objnan, p_treated,
-                   preds_test, preds_train, reps, reps_test):
+    def train_once(self, I_train, i, losses, n_train, objnan, p_treated, preds_test, preds_train, reps, reps_test):
         t_batch, x_batch, y_batch = self.fetch_batch(I_train, n_train)
 
         if __DEBUG__:
@@ -232,8 +247,7 @@ class Train:
             self.sess_runner.run_projection(wip)
 
         if self.should_compute_loss(i):
-            objnan = self.compute_loss(dict_cfactual, dict_factual, dict_valid, i, losses, objnan, t_batch, x_batch,
-                                       y_batch)
+            objnan = self.compute_loss(i, losses, objnan, t_batch, x_batch, y_batch)
 
         if self.should_predict_in_M_iteration(i):
             self.predict(preds_test, preds_train, reps, reps_test)
@@ -254,8 +268,8 @@ class Train:
                 reps_test_i = self.run_h_rep(self.D_test['x'])
                 reps_test.append(reps_test_i)
 
-    def compute_loss(self, dict_cfactual, dict_factual, dict_valid, i, losses, objnan, t_batch, x_batch, y_batch):
-        obj_loss, f_error, imb_err = self.sess_runner.run_losses(dict_factual)
+    def compute_loss(self, i, losses, objnan, t_batch, x_batch, y_batch):
+        obj_loss, f_error, imb_err = self.sess_runner.run_factual_losses()
 
         # TODO what the heck is this line?
         # rep = self.sess.run(self.CFR.h_rep_norm, feed_dict={self.CFR.x: self.D['x'], self.CFR.do_in: 1.0})
@@ -263,7 +277,7 @@ class Train:
         rep_norm = np.mean(np.sqrt(np.sum(np.square(rep), 1)))
 
         if self.D['HAVE_TRUTH']:
-            cf_error = self.sess_runner.run_pred_loss(dict_cfactual)
+            cf_error = self.sess_runner.run_pred_loss()
         else:
             cf_error = np.nan
 
@@ -272,7 +286,7 @@ class Train:
         valid_f_error = np.nan
 
         if FLAGS.val_part > 0:
-            valid_obj, valid_f_error, valid_imb = self.sess_runner.run_loss(dict_valid)
+            valid_obj, valid_f_error, valid_imb = self.sess_runner.run_valid_losses()
 
         losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
         self.log_loss(cf_error, f_error, i, imb_err, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj, x_batch,
