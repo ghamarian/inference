@@ -6,6 +6,7 @@ import random
 import datetime
 import traceback
 import itertools
+import pandas as pd
 
 import cfr.cfr_net as cfr
 from cfr.util import *
@@ -161,19 +162,20 @@ class SessionRunner:
 
 class Train:
     def __init__(self, CFR, sess_runner, has_test, outdir, outform, outform_test, lossform, npzfile, npzfile_test,
-                 repfile, repfile_test, logfile,):
+                 repfile, repfile_test, logfile, ):
         self.repfile = repfile
         self.npzfile_test = npzfile_test
         self.npzfile = npzfile
         self.lossform = lossform
         self.outform_test = outform_test
         self.outform = outform
+        self.outform = outform
         self.repfile_test = repfile_test
         self.outdir = outdir
         self.has_test = has_test
         self.CFR = CFR
         self.sess_runner = sess_runner
-        self.train_step = self.populate_train_step(CFR)
+        self.train_step = self.create_train_step(CFR)
         self.sess_runner.initialize_global_variables()
         self.logfile = logfile
 
@@ -181,11 +183,23 @@ class Train:
             self.all_weights = None
             self.all_beta = None
 
-    def populate_train_step(self, CFR):
+    def create_train_step(self, CFR):
 
         global_step = tf.Variable(0, trainable=False)
         lr = tf.train.exponential_decay(FLAGS.lrate, global_step, NUM_ITERATIONS_PER_DECAY, FLAGS.lrate_decay,
                                         staircase=True)
+
+        opt = self.choose_optimizer(lr)
+
+        ''' Unused gradient clipping '''
+        # gvs = opt.compute_gradients(CFR.tot_loss)
+        # capped_gvs = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in gvs]
+        # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
+
+        train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
+        return train_step
+
+    def choose_optimizer(self, lr):
 
         if FLAGS.optimizer == 'Adagrad':
             opt = tf.train.AdagradOptimizer(lr)
@@ -195,15 +209,9 @@ class Train:
             opt = tf.train.AdamOptimizer(lr)
         else:
             opt = tf.train.RMSPropOptimizer(lr, FLAGS.decay)
+        return opt
 
-        ''' Unused gradient clipping '''
-        # gvs = opt.compute_gradients(CFR.tot_loss)
-        # capped_gvs = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in gvs]
-        # train_step = opt.apply_gradients(capped_gvs, global_step=global_step)
-        train_step = opt.minimize(CFR.tot_loss, global_step=global_step)
-        return train_step
-
-    def set_data(self, D, D_test, i_exp,  I_valid):
+    def set_data(self, D, D_test, i_exp, I_valid):
         self.D = D
         self.D_test = D_test
         self.i_exp = i_exp
@@ -238,6 +246,7 @@ class Train:
         valid_obj = np.nan
         valid_imb = np.nan
         valid_f_error = np.nan
+
         if FLAGS.val_part > 0:
             self.sess_runner.run_factual_losses()
         else:
@@ -494,12 +503,13 @@ class TrainRunner:
         if has_test:
             log(self.logfile, 'Test data: ' + datapath_test)
 
-        D = load_data(datapath)
+        D = load_data_df(datapath)
         D_test = None
         if has_test:
-            D_test = load_data(datapath_test)
+            D_test = load_data_df(datapath_test)
 
-        log(self.logfile, 'Loaded data with shape [%d,%d]' % (D['n'], D['dim']))
+        # log(self.logfile, 'Loaded data with shape [%d,%d]' % (D['n'], D['dim']))
+        log(self.logfile, 'Loaded data with shape [%d,%d]' % (D.n, D.dim))
 
         CFR = self.creat_model(D)
 
@@ -539,12 +549,10 @@ class TrainRunner:
             n_experiments = FLAGS.repetitions
         return n_experiments
 
-
-
     def creat_model(self, D):
 
         ''' Initialize input placeholders '''
-        x = tf.placeholder("float", shape=[None, D['dim']], name='x')  # Features
+        x = tf.placeholder("float", shape=[None, D.dim], name='x')  # Features
         t = tf.placeholder("float", shape=[None, 1], name='t')  # Treatent
         y_ = tf.placeholder("float", shape=[None, 1], name='y_')  # Outcome
 
@@ -557,7 +565,7 @@ class TrainRunner:
 
         ''' Define model graph '''
         log(self.logfile, 'Defining graph...\n')
-        dims = [D['dim'], FLAGS.dim_in, FLAGS.dim_out]
+        dims = [D.dim, FLAGS.dim_in, FLAGS.dim_out]
         CFR = cfr.cfr_net(x, t, y_, p, FLAGS, r_alpha, r_lambda, do_in, do_out, dims)
 
         return CFR
@@ -566,35 +574,45 @@ class TrainRunner:
         if i_exp == 1 or FLAGS.experiments > 1:
             D_exp_test = None
             if npz_input:
-                D_exp = {}
-                D_exp['x'] = D['x'][:, :, i_exp - 1]
-                D_exp['t'] = D['t'][:, i_exp - 1:i_exp]
-                D_exp['yf'] = D['yf'][:, i_exp - 1:i_exp]
-                if D['HAVE_TRUTH']:
-                    D_exp['ycf'] = D['ycf'][:, i_exp - 1:i_exp]
-                else:
-                    D_exp['ycf'] = None
+                D_exp = D[i_exp - 1]
 
                 if has_test:
-                    D_exp_test = {}
-                    D_exp_test['x'] = D_test['x'][:, :, i_exp - 1]
-                    D_exp_test['t'] = D_test['t'][:, i_exp - 1:i_exp]
-                    D_exp_test['yf'] = D_test['yf'][:, i_exp - 1:i_exp]
-                    if D_test['HAVE_TRUTH']:
-                        D_exp_test['ycf'] = D_test['ycf'][:, i_exp - 1:i_exp]
-                    else:
-                        D_exp_test['ycf'] = None
+                    D_exp_test = D_test[i_exp - 1]
             else:
                 datapath = dataform % i_exp
-                D_exp = load_data(datapath)
+                D_exp = load_data_df(datapath)
                 if has_test:
                     datapath_test = dataform_test % i_exp
-                    D_exp_test = load_data(datapath_test)
+                    D_exp_test = load_data_df(datapath_test)
 
-            D_exp['HAVE_TRUTH'] = D['HAVE_TRUTH']
-            if has_test:
-                D_exp_test['HAVE_TRUTH'] = D_test['HAVE_TRUTH']
         return D_exp, D_exp_test
+
+    # def load_experiment_dataset(self, D, i_exp):
+    #     D_exp = {}
+    #     D_exp['x'] = D['x'][:, :, i_exp - 1]
+    #     D_exp['t'] = D['t'][:, i_exp - 1:i_exp]
+    #     D_exp['yf'] = D['yf'][:, i_exp - 1:i_exp]
+    #     if D['HAVE_TRUTH']:
+    #         D_exp['ycf'] = D['ycf'][:, i_exp - 1:i_exp]
+    #     else:
+    #         D_exp['ycf'] = None
+    #     return D_exp
+
+    # def load_experiment_dataset(self, D, i_exp):
+    #     result = {}
+    #     result['x'] = D.df_x.xs(i_exp - 1).values
+    #     result[t] = D.
+    #
+    #
+    #     D_exp = {}
+    #     D_exp['x'] = D['x'][:, :, i_exp - 1]
+    #     D_exp['t'] = D['t'][:, i_exp - 1:i_exp]
+    #     D_exp['yf'] = D['yf'][:, i_exp - 1:i_exp]
+    #     if D['HAVE_TRUTH']:
+    #         D_exp['ycf'] = D['ycf'][:, i_exp - 1:i_exp]
+    #     else:
+    #         D_exp['ycf'] = None
+    #     return D_exp
 
 
 class Output:

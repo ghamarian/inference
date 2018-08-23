@@ -1,5 +1,6 @@
 import tensorflow as tf
 import numpy as np
+import pandas as pd
 
 SQRT_CONST = 1e-10
 
@@ -35,35 +36,114 @@ def save_config(fname):
     f.write(s)
     f.close()
 
-def load_data(fname):
-    """ Load data set """
-    if fname[-3:] == 'npz':
-        data_in = np.load(fname)
-        data = {'x': data_in['x'], 't': data_in['t'], 'yf': data_in['yf']}
-        try:
-            data['ycf'] = data_in['ycf']
-        except:
-            data['ycf'] = None
-    else:
-        if FLAGS.sparse>0:
-            data_in = np.loadtxt(open(fname+'.y',"rb"),delimiter=",")
-            x = load_sparse(fname+'.x')
+
+
+class DataSet:
+
+    def __init__(self, fname):
+        self.data_in = np.load(fname)
+
+        self.df_x, self.n, self.dim, self.num_experiments  = self.load_x()
+        self.df_y = self.load_y()
+
+        self.have_truth = 'ycf' in self.data_in
+        self.list = self.creat_list()
+
+
+    def load_x(self):
+        x = np.swapaxes(self.data_in['x'], 0, 2)
+        n, dim, num_experiments = x.shape
+        experiments = np.swapaxes(x, 1, 2)
+
+        df_x = pd.Panel(experiments).to_frame()
+        df_x.columns.name = 'exper'
+        df_x.index = df_x.index.rename(['row', 'column'])
+
+        df_x = df_x.stack(0).unstack([0, 1]).stack(0)
+
+        return df_x, n, dim, num_experiments
+
+    def load_y(self):
+
+        yf, t = self.data_in['yf'].T, self.data_in['t'].T
+        ycf = self.data_in['ycf'].T if 'ycf' in self.data_in else np.empty_like(t.T)
+
+        df_y = pd.Panel({'yf': yf, 't': t, 'ycf': ycf}).to_frame()
+        df_y.index = df_y.index.rename(['expr', 'row'])
+
+        return df_y
+
+    def creat_list(self, ):
+         return [self.load_experiment_dataset(i) for i in range(self.num_experiments)]
+
+
+    def get_x_of(self, i_exp):
+        return self.df_x.xs(i_exp).values
+
+    def get_result_of(self, column_name, i_exp):
+        return np.expand_dims(self.df_y[column_name].xs(i_exp).values, 1)
+
+    def get_t_of(self, i_exp):
+        return self.get_result_of('t', i_exp)
+
+    def get_yf_of(self, i_exp):
+        return self.get_result_of('yf', i_exp)
+
+    def get_ycf_of(self, i_exp):
+        return self.get_result_of('ycf', i_exp)
+
+    def load_experiment_dataset(self, i_exp):
+        result = {}
+        result['x'] = self.get_x_of(i_exp)
+        result['t'] = self.get_t_of(i_exp)
+        result['yf'] = self.get_yf_of(i_exp)
+        if self.have_truth:
+            result['ycf'] = self.get_ycf_of(i_exp)
         else:
-            data_in = np.loadtxt(open(fname,"rb"),delimiter=",")
-            x = data_in[:,5:]
+            result['ycf'] = None
+        result['HAVE_TRUTH'] = self.have_truth
+        return result
 
-        data = {}
-        data['x'] = x
-        data['t'] = data_in[:,0:1]
-        data['yf'] = data_in[:,1:2]
-        data['ycf'] = data_in[:,2:3]
+    def __getitem__(self, item):
+        return self.list[item]
 
-    data['HAVE_TRUTH'] = not data['ycf'] is None
 
-    data['dim'] = data['x'].shape[1]
-    data['n'] = data['x'].shape[0]
+def load_data_df(fname):
 
-    return data
+    # if fname[-3:] == 'npz':
+   dataset = DataSet(fname)
+   return dataset
+
+
+# def load_data(fname):
+#     """ Load data set """
+#     if fname[-3:] == 'npz':
+#         data_in = np.load(fname)
+#         data = {'x': data_in['x'], 't': data_in['t'], 'yf': data_in['yf']}
+#         # data = {iKey: data_in[iKey] for iKey in ['x', 't', 'yf']}
+#
+#         data['ycf'] = data_in['ycf'] if 'ycf' in data_in else None
+#
+#     else:
+#         if FLAGS.sparse>0:
+#             data_in = np.loadtxt(open(fname+'.y',"rb"),delimiter=",")
+#             x = load_sparse(fname+'.x')
+#         else:
+#             data_in = np.loadtxt(open(fname,"rb"),delimiter=",")
+#             x = data_in[:,5:]
+#
+#         data = {}
+#         data['x'] = x
+#         data['t'] = data_in[:,0:1]
+#         data['yf'] = data_in[:,1:2]
+#         data['ycf'] = data_in[:,2:3]
+#
+#     data['HAVE_TRUTH'] = not data['ycf'] is None
+#
+#     data['dim'] = data['x'].shape[1]
+#     data['n'] = data['x'].shape[0]
+#
+#     return data
 
 def load_sparse(fname):
     """ Load sparse data set """
