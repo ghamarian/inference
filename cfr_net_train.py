@@ -77,10 +77,10 @@ class SessionRunner:
         self.CFR = CFR
         self.sess = tf.Session()
 
-    def create_main_loss_feed_dict(self, train, t_i_train_, cfr_y, expr_dataset):
-        dict_cfactual = {self.CFR.x: expr_dataset['x'][train, :],
-                         self.CFR.t: t_i_train_,
-                         self.CFR.y_: cfr_y,
+    def _create_main_loss_feed_dict(self, x, y, t):
+        dict_cfactual = {self.CFR.x: x,
+                         self.CFR.t: t,
+                         self.CFR.y_: y,
                          self.CFR.do_in: 1.0,
                          self.CFR.do_out: 1.0}
         return dict_cfactual
@@ -88,22 +88,24 @@ class SessionRunner:
     def initialize_global_variables(self):
         self.sess.run(tf.global_variables_initializer())
 
-    def create_loss_feed_dict(self, p_treated, train_or_valid, expr_dataset):
-        result = self.create_main_loss_feed_dict(train_or_valid, expr_dataset['t'][train_or_valid, :],
-                                                 expr_dataset['yf'][train_or_valid, :], expr_dataset)
+    def create_loss_feed_dict(self, p_treated, expr_dataset):
+        result = self._create_main_loss_feed_dict(expr_dataset['x'],
+                                                  expr_dataset['yf'],
+                                                  expr_dataset['t'])
 
         result.update({self.CFR.r_alpha: FLAGS.p_alpha, self.CFR.r_lambda: FLAGS.p_lambda, self.CFR.p_t: p_treated})
         return result
 
-    def set_feed_dicts(self, expr_dataset, p_treated, I_train, I_valid):
-        self.dict_factual = self.create_loss_feed_dict(p_treated, I_train, expr_dataset)
+    def set_feed_dicts(self, expr_train_dataset, expr_valid_dataset, p_treated):
+        self.dict_factual = self.create_loss_feed_dict(p_treated, expr_train_dataset)
 
         if FLAGS.val_part > 0:
-            self.dict_valid = self.create_loss_feed_dict(p_treated, I_valid, expr_dataset)
+            self.dict_valid = self.create_loss_feed_dict(p_treated, expr_valid_dataset)
 
-        if expr_dataset['HAVE_TRUTH']:
-            self.dict_cfactual = self.create_main_loss_feed_dict(I_train, 1 - expr_dataset['t'][I_train, :],
-                                                                 expr_dataset['ycf'][I_train, :], expr_dataset)
+        if expr_train_dataset['HAVE_TRUTH']:
+            self.dict_cfactual = self._create_main_loss_feed_dict(expr_train_dataset['x'],
+                                                                  expr_train_dataset['ycf'],
+                                                                  1 - expr_train_dataset['t'])
 
     def _run_losses(self, dict_factual_or_cfactual):
         obj_loss, f_error, imb_err = self.sess.run([self.CFR.tot_loss, self.CFR.pred_loss, self.CFR.imb_dist],
@@ -211,23 +213,32 @@ class Train:
             opt = tf.train.RMSPropOptimizer(lr, FLAGS.decay)
         return opt
 
-    def set_data(self, expr_dataset, expr_test_dataset, i_exp, I_valid):
-        self.expr_dataset = expr_dataset
+    def set_data(self, expr_dataset, expr_test_dataset, i_exp, valid_idx):
         self.expr_test_dataset = expr_test_dataset
         self.i_exp = i_exp
-        self.I_valid = I_valid
+        self.expr_dataset = expr_dataset
 
-        ''' Train/validation split '''
+        expr_train_dataset, expr_valid_dataset = self.split_dataset(self.expr_dataset, valid_idx)
+
+        self.p_treated = self.compute_treatement_probability(expr_train_dataset)
+
+        self.sess_runner.set_feed_dicts(expr_train_dataset, expr_valid_dataset, self.p_treated)
+
+    def compute_treatement_probability(self, expr_train_dataset):
+        return np.mean(expr_train_dataset['t'])
+
+    def split_dataset(self, expr_dataset, valid_idx):
+
+        self.valid_idx = valid_idx
+
         n = self.expr_dataset['x'].shape[0]
-        self.I_train = list(set(range(n)) - set(self.I_valid))
-        self.n_train = len(self.I_train)
+        self.train_idx = list(set(range(n)) - set(self.valid_idx))
+        self.n_train = len(self.train_idx)
 
-        """ Trains a CFR model on supplied data """
-        ''' Compute treatment probability'''
-        self.p_treated = np.mean(self.expr_dataset['t'][self.I_train, :])
+        train_dataset = {k: v[self.train_idx, :] if type(v) == np.ndarray else v for k, v in expr_dataset.iteritems()}
+        valid_dataset = {k: v[self.valid_idx, :] if type(v) == np.ndarray else v for k, v in expr_dataset.iteritems()}
 
-        ''' Set up loss feed_dicts'''
-        self.sess_runner.set_feed_dicts(self.expr_dataset, self.p_treated, self.I_train, self.I_valid)
+        return train_dataset, valid_dataset
 
     def train(self):
 
@@ -265,7 +276,7 @@ class Train:
 
         ''' Train for multiple iterations '''
         for i in range(FLAGS.iterations):
-            objnan = self.train_once(self.I_train, i, losses, self.n_train, objnan, self.p_treated, preds_test,
+            objnan = self.train_once(self.train_idx, i, losses, self.n_train, objnan, self.p_treated, preds_test,
                                      preds_train, reps, reps_test)
 
         return losses, preds_train, preds_test, reps, reps_test
@@ -426,7 +437,7 @@ class Train:
             np.savetxt('%s_%d.csv' % (self.outform_test, self.i_exp), preds_test[-1], delimiter=',')
             np.savetxt('%s_%d.csv' % (self.lossform, self.i_exp), losses, delimiter=',')
         ''' Save results and predictions '''
-        output_nodes.save_all_valid(self.I_valid)
+        output_nodes.save_all_valid(self.valid_idx)
         ''' Compute weights if doing variable selection '''
         if FLAGS.varsel:
             self.accumulate_weights()
@@ -537,10 +548,10 @@ class TrainRunner:
                                                                 has_test, i_exp, npz_input)
 
             ''' Split into training and validation sets '''
-            I_train, I_valid = validation_split(expr_dataset, FLAGS.val_part)
+            train_idx, valid_idx = validation_split(expr_dataset, FLAGS.val_part)
 
             ''' Run training loop '''
-            trainer.set_data(expr_dataset, expr_test_dataset, i_exp, I_valid)
+            trainer.set_data(expr_dataset, expr_test_dataset, i_exp, valid_idx)
             trainer.save_results(output_nodes)
 
     def calc_repetitions(self):
@@ -590,33 +601,6 @@ class TrainRunner:
                     expr_test_dataset = load_data_df(datapath_test)
 
         return expr_dataset, expr_test_dataset
-
-    # def load_experiment_dataset(self, D, i_exp):
-    #     D_exp = {}
-    #     D_exp['x'] = D['x'][:, :, i_exp - 1]
-    #     D_exp['t'] = D['t'][:, i_exp - 1:i_exp]
-    #     D_exp['yf'] = D['yf'][:, i_exp - 1:i_exp]
-    #     if D['HAVE_TRUTH']:
-    #         D_exp['ycf'] = D['ycf'][:, i_exp - 1:i_exp]
-    #     else:
-    #         D_exp['ycf'] = None
-    #     return D_exp
-
-    # def load_experiment_dataset(self, D, i_exp):
-    #     result = {}
-    #     result['x'] = D.df_x.xs(i_exp - 1).values
-    #     result[t] = D.
-    #
-    #
-    #     D_exp = {}
-    #     D_exp['x'] = D['x'][:, :, i_exp - 1]
-    #     D_exp['t'] = D['t'][:, i_exp - 1:i_exp]
-    #     D_exp['yf'] = D['yf'][:, i_exp - 1:i_exp]
-    #     if D['HAVE_TRUTH']:
-    #         D_exp['ycf'] = D['ycf'][:, i_exp - 1:i_exp]
-    #     else:
-    #         D_exp['ycf'] = None
-    #     return D_exp
 
 
 class Output:
