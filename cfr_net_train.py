@@ -214,33 +214,35 @@ class Train:
         return opt
 
     def set_data(self, expr_dataset, expr_test_dataset, i_exp, valid_idx):
-        self.expr_test_dataset = expr_test_dataset
         self.i_exp = i_exp
+        self.expr_test_dataset = expr_test_dataset
         self.expr_dataset = expr_dataset
 
-        expr_train_dataset, expr_valid_dataset = self.split_dataset(self.expr_dataset, valid_idx)
+        expr_train_dataset, expr_valid_dataset = self.split_dataset(expr_dataset, valid_idx)
 
-        self.p_treated = self.compute_treatement_probability(expr_train_dataset)
+        p_treated = self.compute_treatement_probability(expr_train_dataset)
 
-        self.sess_runner.set_feed_dicts(expr_train_dataset, expr_valid_dataset, self.p_treated)
+        self.sess_runner.set_feed_dicts(expr_train_dataset, expr_valid_dataset, p_treated)
+
+        return p_treated, expr_train_dataset
+
 
     def compute_treatement_probability(self, expr_train_dataset):
         return np.mean(expr_train_dataset['t'])
 
     def split_dataset(self, expr_dataset, valid_idx):
 
-        self.valid_idx = valid_idx
+        self.valid_idx = valid_idx #TODO to be removed after dealing with losses
 
-        n = self.expr_dataset['x'].shape[0]
-        self.train_idx = list(set(range(n)) - set(self.valid_idx))
-        self.n_train = len(self.train_idx)
+        n = expr_dataset['x'].shape[0]
+        train_idx = list(set(range(n)) - set(self.valid_idx))
 
-        train_dataset = {k: v[self.train_idx, :] if type(v) == np.ndarray else v for k, v in expr_dataset.iteritems()}
-        valid_dataset = {k: v[self.valid_idx, :] if type(v) == np.ndarray else v for k, v in expr_dataset.iteritems()}
+        train_dataset = {k: v[train_idx, :] if type(v) == np.ndarray else v for k, v in expr_dataset.iteritems()}
+        valid_dataset = {k: v[valid_idx, :] if type(v) == np.ndarray else v for k, v in expr_dataset.iteritems()}
 
         return train_dataset, valid_dataset
 
-    def train(self):
+    def train(self, p_treated, expr_train_dataset):
 
         ''' Set up for storing predictions '''
         preds_train = []
@@ -251,7 +253,7 @@ class Train:
         obj_loss, f_error, imb_err = self.sess_runner.run_factual_losses()
 
         cf_error = np.nan
-        if self.expr_dataset['HAVE_TRUTH']:
+        if expr_train_dataset['HAVE_TRUTH']:
             cf_error = self.sess_runner.run_pred_loss()
 
         valid_obj = np.nan
@@ -261,11 +263,7 @@ class Train:
         if FLAGS.val_part > 0:
             self.sess_runner.run_factual_losses()
         else:
-            self.dict_valid = dict(
-                itertools.product(
-                    [self.CFR.x, self.CFR.t, self.CFR.y_, self.CFR.do_in, self.CFR.do_out, self.CFR.r_alpha,
-                     self.CFR.r_lambda, self.CFR.p_t],
-                    np.array([])))
+            self.dict_valid = None
 
         losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
 
@@ -276,8 +274,8 @@ class Train:
 
         ''' Train for multiple iterations '''
         for i in range(FLAGS.iterations):
-            objnan = self.train_once(self.train_idx, i, losses, self.n_train, objnan, self.p_treated, preds_test,
-                                     preds_train, reps, reps_test)
+            objnan = self.train_once(i, losses, objnan, p_treated, preds_test, preds_train, reps, reps_test,
+                                     expr_train_dataset)
 
         return losses, preds_train, preds_test, reps, reps_test
 
@@ -285,8 +283,8 @@ class Train:
         ''' Compute loss every N iterations '''
         return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
 
-    def train_once(self, I_train, i, losses, n_train, objnan, p_treated, preds_test, preds_train, reps, reps_test):
-        t_batch, x_batch, y_batch = self.fetch_batch(I_train, n_train)
+    def train_once(self, i, losses, objnan, p_treated, preds_test, preds_train, reps, reps_test, expr_train_dataset):
+        t_batch, x_batch, y_batch = self.fetch_batch(expr_train_dataset)
 
         if __DEBUG__:
             self.log_stats(t_batch, x_batch)
@@ -300,7 +298,7 @@ class Train:
             self.sess_runner.run_projection(wip)
 
         if self.should_compute_loss(i):
-            objnan = self.compute_loss(i, losses, objnan, t_batch, x_batch, y_batch)
+            objnan = self.compute_loss(i, losses, objnan, t_batch, x_batch, y_batch, expr_train_dataset)
 
         if self.should_predict_in_M_iteration(i):
             self.predict(preds_test, preds_train, reps, reps_test)
@@ -321,7 +319,7 @@ class Train:
                 reps_test_i = self.run_h_rep(self.expr_test_dataset['x'])
                 reps_test.append(reps_test_i)
 
-    def compute_loss(self, i, losses, objnan, t_batch, x_batch, y_batch):
+    def compute_loss(self, i, losses, objnan, t_batch, x_batch, y_batch, expr_train_dataset):
         obj_loss, f_error, imb_err = self.sess_runner.run_factual_losses()
 
         # TODO what the heck is this line?
@@ -329,7 +327,7 @@ class Train:
         rep = self.sess_runner.run_h_norm(self.expr_dataset['x'], 1.0)
         rep_norm = np.mean(np.sqrt(np.sum(np.square(rep), 1)))
 
-        if self.expr_dataset['HAVE_TRUTH']:
+        if expr_train_dataset['HAVE_TRUTH']:
             cf_error = self.sess_runner.run_pred_loss()
         else:
             cf_error = np.nan
@@ -378,12 +376,14 @@ class Train:
         log(self.logfile,
             'Median: %.4g, Mean: %.4f, Max: %.4f' % (np.median(M.tolist()), np.mean(M.tolist()), np.amax(M.tolist())))
 
-    def fetch_batch(self, I_train, n_train):
+    def fetch_batch(self, expr_train_dataset):
+
+        n_train = expr_train_dataset['x'].shape[0]
         batch_indices = random.sample(range(0, n_train), FLAGS.batch_size)
 
-        x_batch = self.expr_dataset['x'][I_train, :][batch_indices, :]
-        t_batch = self.expr_dataset['t'][I_train, :][batch_indices]
-        y_batch = self.expr_dataset['yf'][I_train, :][batch_indices]
+        x_batch = expr_train_dataset['x'][batch_indices, :]
+        t_batch = expr_train_dataset['t'][batch_indices]
+        y_batch = expr_train_dataset['yf'][batch_indices]
 
         return t_batch, x_batch, y_batch
 
@@ -419,9 +419,9 @@ class Train:
     def get_all_weights(self):
         return self.all_weights
 
-    def save_results(self, output_nodes):
+    def save_results(self, output_nodes, p_treated, expr_train_dataset):
 
-        losses, preds_train, preds_test, reps, reps_test = self.train()
+        losses, preds_train, preds_test, reps, reps_test = self.train(p_treated, expr_train_dataset)
 
         output_nodes.collect_all_reps(losses, preds_test, preds_train)
         ''' Fix shape for output (n_units, dim, n_reps, n_outputs) '''
@@ -550,9 +550,8 @@ class TrainRunner:
             ''' Split into training and validation sets '''
             train_idx, valid_idx = validation_split(expr_dataset, FLAGS.val_part)
 
-            ''' Run training loop '''
-            trainer.set_data(expr_dataset, expr_test_dataset, i_exp, valid_idx)
-            trainer.save_results(output_nodes)
+            p_treated, expr_train_dataset = trainer.set_data(expr_dataset, expr_test_dataset, i_exp, valid_idx)
+            trainer.save_results(output_nodes, p_treated, expr_train_dataset)
 
     def calc_repetitions(self):
         n_experiments = FLAGS.experiments
@@ -616,8 +615,8 @@ class Output:
         self.all_preds_test.append(preds_test)
         self.all_losses.append(losses)
 
-    def save_all_valid(self, I_valid):
-        self.all_valid.append(I_valid)
+    def save_all_valid(self, valid_idx):
+        self.all_valid.append(valid_idx)
 
     def get_all_valid(self):
         return np.array(self.all_valid)
