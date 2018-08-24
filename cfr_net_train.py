@@ -1,3 +1,4 @@
+
 import tensorflow as tf
 import numpy as np
 import sys, os
@@ -257,7 +258,7 @@ class Train:
         for i in range(FLAGS.iterations):
             objnan = self.train_once(i, losses, objnan, p_treated, expr_train_dataset)
 
-            if self.should_predict_in_M_iteration(i):
+            if self.should_predict(i):
 
                 self.append_result(self.expr_dataset, preds_train, reps)
 
@@ -291,7 +292,9 @@ class Train:
         return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
 
     def train_once(self, i, losses, objnan, p_treated, expr_train_dataset):
+
         t_batch, x_batch, y_batch = self.fetch_batch(expr_train_dataset)
+        batch_params = list([t_batch, x_batch, y_batch])
 
         if __DEBUG__:
             self.log_stats(t_batch, x_batch)
@@ -305,50 +308,43 @@ class Train:
             self.sess_runner.run_projection(wip)
 
         if self.should_compute_loss(i):
-            objnan = self.compute_loss(i, losses, objnan, t_batch, x_batch, y_batch, expr_train_dataset)
+            objnan = self.compute_loss(i, losses, objnan, batch_params, expr_train_dataset)
 
         return objnan
 
     def should_save_reps(self):
         return FLAGS.save_rep and self.i_exp == 1
 
-    def compute_loss(self, i, losses, objnan, t_batch, x_batch, y_batch, expr_train_dataset):
-        obj_loss, f_error, imb_err = self.sess_runner.run_factual_losses()
+    def compute_loss(self, i, losses, objnan, batch_params, expr_train_dataset):
+
 
         # TODO what the heck is this line?
         # rep = self.sess.run(self.CFR.h_rep_norm, feed_dict={self.CFR.x: self.D['x'], self.CFR.do_in: 1.0})
         rep = self.sess_runner.run_h_norm(self.expr_dataset['x'], 1.0)
         rep_norm = np.mean(np.sqrt(np.sum(np.square(rep), 1)))
 
-        if expr_train_dataset['HAVE_TRUTH']:
-            cf_error = self.sess_runner.run_pred_loss()
-        else:
-            cf_error = np.nan
+        latest_losses = self.calc_pred_loss(expr_train_dataset)
+        losses.append(latest_losses)
+        obj_loss = latest_losses[0] #TODO later
+        all_loss_vals = latest_losses + batch_params
 
-        valid_obj = np.nan
-        valid_imb = np.nan
-        valid_f_error = np.nan
-
-        if FLAGS.val_part > 0:
-            valid_obj, valid_f_error, valid_imb = self.sess_runner.run_valid_losses()
-
-        losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
-        self.log_loss(cf_error, f_error, i, imb_err, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj, x_batch,
-                      y_batch)
-
+        self.log_loss(all_loss_vals,i)
         if np.isnan(obj_loss):
             log(self.logfile, 'Experiment %d: Objective is NaN. Skipping.' % self.i_exp)
             objnan = True
 
         return objnan
 
-    def log_loss(self, cf_error, f_error, i, imb_err, obj_loss, t_batch, valid_f_error, valid_imb, valid_obj, x_batch,
-                 y_batch):
-        loss_str = '%d\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' % (
-            i, obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj)
+    def log_loss(self, all_loss_vals, i):
+
+        log_param_labels = [ 'obj_loss', 'f_error', 'cf_error', 'imb_err', 'valid_obj', 'valid_f_error', 'valid_imb', 't_batch', 'x_batch','y_batch']
+        log_param_vals = dict(zip(log_param_labels, all_loss_vals))
+
+        loss_str = '%d\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' %(
+            i, log_param_vals['obj_loss'], log_param_vals['f_error'], log_param_vals['cf_error'], log_param_vals['imb_err'], log_param_vals['valid_f_error'], log_param_vals['valid_imb'], log_param_vals['valid_obj'])
 
         if FLAGS.loss == 'log':
-            acc = self.compute_accuracy(t_batch, x_batch, y_batch)
+            acc = self.compute_accuracy(log_param_vals['t_batch'],log_param_vals['x_batch'],log_param_vals['y_batch'])
             loss_str += ',\tAcc: %.2f%%' % acc
 
         log(self.logfile, loss_str)
@@ -394,7 +390,7 @@ class Train:
         y_pred_f = self.sess_runner.run_output(x, t, 1.0, 1.0)
         return y_pred_f
 
-    def should_predict_in_M_iteration(self, i):
+    def should_predict(self, i):
         ''' Compute predictions every M iterations '''
         return (FLAGS.pred_output_delay > 0 and i % FLAGS.pred_output_delay == 0) or i == FLAGS.iterations - 1
 
