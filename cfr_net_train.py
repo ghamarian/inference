@@ -226,13 +226,12 @@ class Train:
 
         return p_treated, expr_train_dataset
 
-
     def compute_treatement_probability(self, expr_train_dataset):
         return np.mean(expr_train_dataset['t'])
 
     def split_dataset(self, expr_dataset, valid_idx):
 
-        self.valid_idx = valid_idx #TODO to be removed after dealing with losses
+        self.valid_idx = valid_idx  # TODO to be removed after dealing with losses
 
         n = expr_dataset['x'].shape[0]
         train_idx = list(set(range(n)) - set(self.valid_idx))
@@ -247,30 +246,14 @@ class Train:
         preds_train = []
         preds_test = []
         losses = []
-
-        obj_loss, f_error, imb_err = self.sess_runner.run_factual_losses()
-
-        cf_error = np.nan
-        if expr_train_dataset['HAVE_TRUTH']:
-            cf_error = self.sess_runner.run_pred_loss()
-
-        valid_obj = np.nan
-        valid_imb = np.nan
-        valid_f_error = np.nan
-
-        if FLAGS.val_part > 0:
-            self.sess_runner.run_factual_losses()
-        else:
-            self.dict_valid = None
-
-        losses.append([obj_loss, f_error, cf_error, imb_err, valid_f_error, valid_imb, valid_obj])
-
-        objnan = False
-
         reps = []
         reps_test = []
 
-        ''' Train for multiple iterations '''
+        latest_loss = self.calc_pred_loss(expr_train_dataset)
+        losses.append(latest_loss)
+
+        objnan = False
+
         for i in range(FLAGS.iterations):
             objnan = self.train_once(i, losses, objnan, p_treated, expr_train_dataset)
 
@@ -282,6 +265,19 @@ class Train:
                     self.append_result(self.expr_test_dataset, preds_test, reps_test)
 
         return losses, preds_train, preds_test, reps, reps_test
+
+    def calc_pred_loss(self, expr_train_dataset):
+        cf_error = np.nan
+        if expr_train_dataset['HAVE_TRUTH']:
+            cf_error = self.sess_runner.run_pred_loss()
+        latest_loss = list(self.sess_runner.run_factual_losses())
+        if FLAGS.val_part > 0:
+            latest_loss += list(self.sess_runner.run_factual_losses())
+        else:
+            self.dict_valid = None
+            latest_loss += [np.nan, np.nan, np.nan]
+        latest_loss.insert(2, cf_error)  # TODO fix this ugly beast
+        return latest_loss
 
     def append_result(self, dataset, preds_train, reps):
 
