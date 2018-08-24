@@ -244,12 +244,10 @@ class Train:
 
     def train(self, p_treated, expr_train_dataset):
 
-        ''' Set up for storing predictions '''
         preds_train = []
         preds_test = []
-
-        ''' Compute losses '''
         losses = []
+
         obj_loss, f_error, imb_err = self.sess_runner.run_factual_losses()
 
         cf_error = np.nan
@@ -274,16 +272,29 @@ class Train:
 
         ''' Train for multiple iterations '''
         for i in range(FLAGS.iterations):
-            objnan = self.train_once(i, losses, objnan, p_treated, preds_test, preds_train, reps, reps_test,
-                                     expr_train_dataset)
+            objnan = self.train_once(i, losses, objnan, p_treated, expr_train_dataset)
+
+            if self.should_predict_in_M_iteration(i):
+
+                self.append_result(self.expr_dataset, preds_train, reps)
+
+                if self.expr_test_dataset is not None:
+                    self.append_result(self.expr_test_dataset, preds_test, reps_test)
 
         return losses, preds_train, preds_test, reps, reps_test
+
+    def append_result(self, dataset, preds_train, reps):
+
+        preds_train.append(self.run_yfact_and_ycfact(dataset))
+        if self.should_save_reps():
+            reps_i = self.run_h_rep(dataset['x'])
+            reps.append(reps_i)
 
     def should_compute_loss(self, i):
         ''' Compute loss every N iterations '''
         return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
 
-    def train_once(self, i, losses, objnan, p_treated, preds_test, preds_train, reps, reps_test, expr_train_dataset):
+    def train_once(self, i, losses, objnan, p_treated, expr_train_dataset):
         t_batch, x_batch, y_batch = self.fetch_batch(expr_train_dataset)
 
         if __DEBUG__:
@@ -300,24 +311,10 @@ class Train:
         if self.should_compute_loss(i):
             objnan = self.compute_loss(i, losses, objnan, t_batch, x_batch, y_batch, expr_train_dataset)
 
-        if self.should_predict_in_M_iteration(i):
-            self.predict(preds_test, preds_train, reps, reps_test)
-
         return objnan
 
-    def predict(self, preds_test, preds_train, reps, reps_test):
-        y_preds = self.run_yfact_and_ycfact(self.expr_dataset)
-        preds_train.append(y_preds)
-        if self.expr_test_dataset is not None:
-            y_preds = self.run_yfact_and_ycfact(self.expr_test_dataset)
-            preds_test.append(y_preds)
-        if FLAGS.save_rep and self.i_exp == 1:
-            reps_i = self.run_h_rep(self.expr_dataset['x'])
-            reps.append(reps_i)
-
-            if self.expr_test_dataset is not None:
-                reps_test_i = self.run_h_rep(self.expr_test_dataset['x'])
-                reps_test.append(reps_test_i)
+    def should_save_reps(self):
+        return FLAGS.save_rep and self.i_exp == 1
 
     def compute_loss(self, i, losses, objnan, t_batch, x_batch, y_batch, expr_train_dataset):
         obj_loss, f_error, imb_err = self.sess_runner.run_factual_losses()
@@ -449,7 +446,7 @@ class Train:
         if self.has_test:
             np.savez(self.npzfile_test, pred=out_preds_test)
         ''' Save representations '''
-        if FLAGS.save_rep and self.i_exp == 1:
+        if self.should_save_reps():
             np.savez(self.repfile, rep=reps)
 
             if self.has_test:
