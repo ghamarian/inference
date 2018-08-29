@@ -163,6 +163,28 @@ class SessionRunner:
         return self.sess.run(self.CFR.weights_pred)
 
 
+class Results:
+
+    def __init__(self, objnan_value):
+        self.preds = []
+        self.losses = []
+        self.reps = []
+        self.objnan = objnan_value
+
+    def update_loss(self, latest_loss):
+        self.losses.append(latest_loss)
+
+
+    def update_prediction(self, new_predictions):
+        self.preds.append(new_predictions)
+
+    def update_representaion(self, new_predictions):
+        self.reps.append(new_predictions)
+
+    def get_results(self):
+        return self.losses, self.preds, self.reps
+
+
 class Train:
     def __init__(self, CFR, sess_runner, has_test, outdir, outform, outform_test, lossform, npzfile, npzfile_test,
                  repfile, repfile_test, logfile, ):
@@ -244,28 +266,26 @@ class Train:
 
     def train(self, p_treated, expr_train_dataset):
 
-        preds_train = []
-        preds_test = []
-        losses = []
-        reps = []
-        reps_test = []
+        train_results = Results( False)
+        test_results =  Results(False)
 
         latest_loss = self.calc_pred_loss(expr_train_dataset)
-        losses.append(latest_loss)
-
-        objnan = False
+        train_results.update_loss(latest_loss)
 
         for i in range(FLAGS.iterations):
-            objnan = self.train_once(i, losses, objnan, p_treated, expr_train_dataset)
 
+            self.train_once(i, train_results, p_treated, expr_train_dataset)
             if self.should_predict(i):
 
-                self.append_result(self.expr_dataset, preds_train, reps)
+
+                self.append_result(self.expr_dataset, train_results)
 
                 if self.expr_test_dataset is not None:
-                    self.append_result(self.expr_test_dataset, preds_test, reps_test)
 
-        return losses, preds_train, preds_test, reps, reps_test
+                    self.append_result(self.expr_test_dataset, test_results)
+
+
+        return train_results.get_results() + test_results.get_results()
 
     def calc_pred_loss(self, expr_train_dataset):
         cf_error = np.nan
@@ -280,26 +300,27 @@ class Train:
         latest_loss.insert(2, cf_error)  # TODO fix this ugly beast
         return latest_loss
 
-    def append_result(self, dataset, preds_train, reps):
+    def append_result(self, dataset, results):
 
-        preds_train.append(self.run_yfact_and_ycfact(dataset))
+        results.update_prediction(self.run_yfact_and_ycfact(dataset))
         if self.should_save_reps():
             reps_i = self.run_h_rep(dataset['x'])
-            reps.append(reps_i)
+            results.update_representaion(reps_i)
 
     def should_compute_loss(self, i):
         ''' Compute loss every N iterations '''
         return i % FLAGS.output_delay == 0 or i == FLAGS.iterations - 1
 
-    def train_once(self, i, losses, objnan, p_treated, expr_train_dataset):
+    def train_once(self, i, train_results, p_treated, expr_train_dataset):
 
         t_batch, x_batch, y_batch = self.fetch_batch(expr_train_dataset)
+
         batch_params = list([t_batch, x_batch, y_batch])
 
         if __DEBUG__:
             self.log_stats(t_batch, x_batch)
 
-        if not objnan:
+        if not train_results.objnan:
             self.gradient_step(p_treated, t_batch, x_batch, y_batch)
 
         ''' Project variable selection weights '''
@@ -308,15 +329,17 @@ class Train:
             self.sess_runner.run_projection(wip)
 
         if self.should_compute_loss(i):
-            objnan = self.compute_loss(i, losses, objnan, batch_params, expr_train_dataset)
+            self.compute_loss(i, train_results, batch_params, expr_train_dataset)
 
-        return objnan
+        return
 
     def should_save_reps(self):
         return FLAGS.save_rep and self.i_exp == 1
 
-    def compute_loss(self, i, losses, objnan, batch_params, expr_train_dataset):
+    def compute_loss(self, i, train_results, batch_params, expr_train_dataset):
 
+        log_param_labels = ['obj_loss', 'f_error', 'cf_error', 'imb_err', 'valid_obj', 'valid_f_error',
+                            'valid_imb', 't_batch', 'x_batch', 'y_batch']
 
         # TODO what the heck is this line?
         # rep = self.sess.run(self.CFR.h_rep_norm, feed_dict={self.CFR.x: self.D['x'], self.CFR.do_in: 1.0})
@@ -324,27 +347,27 @@ class Train:
         rep_norm = np.mean(np.sqrt(np.sum(np.square(rep), 1)))
 
         latest_losses = self.calc_pred_loss(expr_train_dataset)
-        losses.append(latest_losses)
-        obj_loss = latest_losses[0] #TODO later
+        train_results.update_loss(latest_losses)
+        obj_loss = latest_losses[log_param_labels.index('obj_loss')]
         all_loss_vals = latest_losses + batch_params
-
-        self.log_loss(all_loss_vals,i)
-        if np.isnan(obj_loss):
-            log(self.logfile, 'Experiment %d: Objective is NaN. Skipping.' % self.i_exp)
-            objnan = True
-
-        return objnan
-
-    def log_loss(self, all_loss_vals, i):
-
-        log_param_labels = [ 'obj_loss', 'f_error', 'cf_error', 'imb_err', 'valid_obj', 'valid_f_error', 'valid_imb', 't_batch', 'x_batch','y_batch']
         log_param_vals = dict(zip(log_param_labels, all_loss_vals))
+        self.log_loss(log_param_vals, all_loss_vals, i)
 
-        loss_str = '%d\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' %(
-            i, log_param_vals['obj_loss'], log_param_vals['f_error'], log_param_vals['cf_error'], log_param_vals['imb_err'], log_param_vals['valid_f_error'], log_param_vals['valid_imb'], log_param_vals['valid_obj'])
+        if np.isnan(obj_loss):  # TODO later
+            log(self.logfile, 'Experiment %d: Objective is NaN. Skipping.' % self.i_exp)
+            train_results.set_objnan(True)
+
+        return
+
+    def log_loss(self, log_param_vals, all_loss_vals, i):
+
+        loss_str = '%d\tObj: %.3f,\tF: %.3f,\tCf: %.3f,\tImb: %.2g,\tVal: %.3f,\tValImb: %.2g,\tValObj: %.2f' % (
+            i, log_param_vals['obj_loss'], log_param_vals['f_error'], log_param_vals['cf_error'],
+            log_param_vals['imb_err'], log_param_vals['valid_f_error'], log_param_vals['valid_imb'],
+            log_param_vals['valid_obj'])
 
         if FLAGS.loss == 'log':
-            acc = self.compute_accuracy(log_param_vals['t_batch'],log_param_vals['x_batch'],log_param_vals['y_batch'])
+            acc = self.compute_accuracy(log_param_vals['t_batch'], log_param_vals['x_batch'], log_param_vals['y_batch'])
             loss_str += ',\tAcc: %.2f%%' % acc
 
         log(self.logfile, loss_str)
@@ -410,7 +433,7 @@ class Train:
 
     def save_results(self, output_nodes, p_treated, expr_train_dataset):
 
-        losses, preds_train, preds_test, reps, reps_test = self.train(p_treated, expr_train_dataset)
+        losses, preds_train, reps, losses_test, preds_test, reps_test = self.train(p_treated, expr_train_dataset)
 
         output_nodes.collect_all_reps(losses, preds_test, preds_train)
         ''' Fix shape for output (n_units, dim, n_reps, n_outputs) '''
